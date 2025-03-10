@@ -1,3 +1,4 @@
+import PIL
 from PIL import Image
 import torchvision.transforms as transforms
 
@@ -31,3 +32,45 @@ def process_image(input_path, target_size=512):
         tensor_img = image_transforms(img)
         
     return tensor_img.unsqueeze(0)  # 添加batch维度
+
+
+def clip_process(input_path):
+    """
+    for the clip model, image should be a [224, 224] tensor
+    """
+    image = Image.open(input_path)
+    image = image.convert("RGB")
+
+    size = 224
+    W, H = image.size
+    interpolation = transforms.InterpolationMode.BILINEAR
+    # 定义通用预处理（排除 RandomCrop）
+    process = []
+
+    """# 需要裁剪时
+    if H >= size and W >= size:
+        # 获取随机裁剪参数
+        i, j, h, w = transforms.RandomCrop.get_params(
+            image, output_size=(size, size)
+        )
+        
+        # 对两个图像应用相同的裁剪坐标
+        process += transforms.Lambda(lambda x: transforms.functional.crop(x, i, j, h, w)),
+    else:"""
+
+    # 小图直接中心裁剪+缩放
+    process += transforms.Resize(size, interpolation=interpolation),
+    process += transforms.CenterCrop(size),
+    
+    process += transforms.ToTensor(),
+    
+
+    process += transforms.Normalize(
+        mean=[0.48145466, 0.4578275, 0.40821073],
+        std=[0.26862954, 0.26130258, 0.27577711]
+    ),
+    process = transforms.Compose(process)
+
+
+    image = process(image).unsqueeze(0)
+    return image
