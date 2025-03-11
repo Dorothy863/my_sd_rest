@@ -77,7 +77,7 @@ def image_grid(imgs, rows, cols):
 
 
 def log_validation(
-    vae, text_encoder, tokenizer, unet, controlnet, args, accelerator, weight_dtype, step, is_final_validation=False
+    vae, text_encoder, tokenizer, unet, controlnet, args, accelerator, weight_dtype, step, is_final_validation=False, clip_image_encoder=None, mapper=None,
 ):
     logger.info("Running validation... ")
 
@@ -110,7 +110,28 @@ def log_validation(
     else:
         generator = torch.Generator(device=accelerator.device).manual_seed(args.seed)
 
-    if len(args.validation_image) == len(args.validation_prompt):
+    base_text = "a photo of {}"
+    placeholder = "S"
+    validation_text = base_text.format(placeholder)
+    
+    # 处理图像特征提取 (新增部分)
+    def process_validation_image(image):
+        # 使用与训练一致的预处理
+        image_transforms = transforms.Compose([
+            transforms.Resize(args.resolution, interpolation=transforms.InterpolationMode.BILINEAR),
+            transforms.CenterCrop(args.resolution),
+            transforms.ToTensor(),
+        ])
+        return image_transforms(image.convert("RGB")).unsqueeze(0).to(accelerator.device)
+
+    if len(args.validation_image) == 1:
+        validation_images = args.validation_image
+        validation_prompts = validation_text
+    else:
+        # validation_images = args.validation_image
+        validation_images = args.validation_image
+        validation_prompts = [validation_text] * len(args.validation_image)
+    """if len(args.validation_image) == len(args.validation_prompt):
         validation_images = args.validation_image
         validation_prompts = args.validation_prompt
     elif len(args.validation_image) == 1:
@@ -122,7 +143,7 @@ def log_validation(
     else:
         raise ValueError(
             "number of `args.validation_image` and `args.validation_prompt` should be checked in `parse_args`"
-        )
+        )"""
 
     image_logs = []
     inference_ctx = contextlib.nullcontext() if is_final_validation else torch.autocast("cuda")
@@ -130,12 +151,46 @@ def log_validation(
     for validation_prompt, validation_image in zip(validation_prompts, validation_images):
         validation_image = Image.open(validation_image).convert("RGB")
 
+        # 处理输入图像 (新增部分)
+        processed_image = process_validation_image(validation_image)
+        
+        # 提取图像特征和生成嵌入 (新增部分)
+        with torch.no_grad():
+            image_features = clip_image_encoder(processed_image).last_hidden_state
+            inj_embedding = mapper(image_features)
+        
+        # 构建注入输入 (新增部分)
+        input_ids = tokenizer(
+            validation_text,
+            padding="max_length",
+            truncation=True,
+            max_length=tokenizer.model_max_length,
+            return_tensors="pt"
+        ).input_ids.to(accelerator.device)
+        
+        # 确定占位符位置 (新增部分)
+        words = validation_text.strip().split(' ')
+        placeholder_index = words.index(placeholder) + 1  # +1 因为CLIP添加了开始token
+        
+        # 生成提示嵌入 (修改部分)
+        text_input = {
+            "input_ids": input_ids,
+            "inj_embedding": inj_embedding,
+            "inj_index": torch.tensor([placeholder_index]).to(accelerator.device)
+        }
+        prompt_embeds = text_encoder(text_input)[0]
+
         images = []
 
         for _ in range(args.num_validation_images):
             with inference_ctx:
+                # 使用生成的嵌入 (修改部分)
                 image = pipeline(
-                    validation_prompt, validation_image, num_inference_steps=20, generator=generator
+                    validation_prompt=None,  # 使用嵌入时不需文本提示
+                    image=validation_image,
+                    prompt_embeds=prompt_embeds,
+                    num_inference_steps=28,
+                    generator=generator
                 ).images[0]
 
             images.append(image)
@@ -839,8 +894,7 @@ def main(args):
     mapper.eval()
 
     clip_image_encoder = CLIPVisionModel.from_pretrained(
-        args.pretrained_model_name_or_path, 
-        subfolder="image_encoder"
+        args.clip_path, 
     ).to(accelerator.device)
 
     orig_text_forward = text_encoder.text_model.forward
@@ -893,6 +947,7 @@ def main(args):
     vae.requires_grad_(False)
     unet.requires_grad_(False)
     text_encoder.requires_grad_(False)
+    clip_image_encoder.requires_grad_(False)
     controlnet.train()
 
     if args.enable_xformers_memory_efficient_attention:
@@ -1019,6 +1074,7 @@ def main(args):
     vae.to(accelerator.device, dtype=weight_dtype)
     unet.to(accelerator.device, dtype=weight_dtype)
     text_encoder.to(accelerator.device, dtype=weight_dtype)
+    clip_image_encoder.to(accelerator.device, dtype=weight_dtype)
 
     # We need to recalculate our total training steps as the size of the training dataloader may have changed.
     num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
@@ -1210,6 +1266,8 @@ def main(args):
                             accelerator,
                             weight_dtype,
                             global_step,
+                            clip_image_encoder = clip_image_encoder,
+                            mapper = mapper,
                         )
 
             logs = {"loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
@@ -1239,6 +1297,8 @@ def main(args):
                 weight_dtype=weight_dtype,
                 step=global_step,
                 is_final_validation=True,
+                clip_image_encoder = clip_image_encoder,
+                mapper = mapper,
             )
 
         if args.push_to_hub:

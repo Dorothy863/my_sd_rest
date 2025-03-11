@@ -15,6 +15,31 @@
                 "PYTHONPATH": "${workspaceFolder}"
             }
         },
-        
+        {
+            "name": "Python: Train ControlNet",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "train_controlnet.py",
+            "args": [
+                "--pretrained_model_name_or_path=/path/to/your/pretrained_model",
+                "--output_dir=./experience",
+                "--dataset_name=fusing/fill50k",
+                "--resolution=512",
+                "--learning_rate=1e-5",
+                "--validation_image",
+                "./conditioning_image_1.png",
+                "./conditioning_image_2.png",
+                // "--validation_prompt",
+                // "red circle with blue background",
+                "--train_batch_size=1",
+                "--gradient_accumulation_steps=4"
+            ],
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}"
+            },
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+        }
     ]
 }
