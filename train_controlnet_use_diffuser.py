@@ -118,11 +118,23 @@ def log_validation(
     # 处理图像特征提取 (新增部分)
     def process_validation_image(image):
         # 使用与训练一致的预处理
-        image_transforms = transforms.Compose([
+        image_transforms = transforms.Compose( # the clip process input range should be [0, 1]
+                [
+                    transforms.Resize(512, interpolation=transforms.InterpolationMode.BILINEAR),
+                    transforms.CenterCrop(512),
+                    transforms.ToTensor(),
+                    transforms.Resize((224, 224), interpolation=transforms.InterpolationMode.BILINEAR),
+                    transforms.Normalize(
+                        mean=[0.48145466, 0.4578275, 0.40821073],
+                        std=[0.26862954, 0.26130258, 0.27577711]
+                    )
+                    ]
+            )
+        """image_transforms = transforms.Compose([
             transforms.Resize(args.resolution, interpolation=transforms.InterpolationMode.BILINEAR),
             transforms.CenterCrop(args.resolution),
             transforms.ToTensor(),
-        ])
+        ])"""
         return image_transforms(image.convert("RGB")).unsqueeze(0).to(accelerator.device)
 
     if len(args.validation_image) == 1:
@@ -187,11 +199,12 @@ def log_validation(
             with inference_ctx:
                 # 使用生成的嵌入 (修改部分)
                 image = pipeline(
-                    validation_prompt=None,  # 使用嵌入时不需文本提示
-                    image=validation_image,
+                    # validation_prompt=None,  # 使用嵌入时不需文本提示
+                    # image=validation_image,
                     prompt_embeds=prompt_embeds,
                     num_inference_steps=28,
-                    generator=generator
+                    guidance_scale=5,
+                    generator=generator,
                 ).images[0]
 
             images.append(image)
