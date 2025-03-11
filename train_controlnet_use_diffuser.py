@@ -48,6 +48,7 @@ from diffusers import (
     StableDiffusionControlNetPipeline,
     UNet2DConditionModel,
     UniPCMultistepScheduler,
+    PNDMScheduler,
 )
 from diffusers.optimization import get_scheduler
 from diffusers.utils import check_min_version, is_wandb_available
@@ -98,7 +99,7 @@ def log_validation(
         variant=args.variant,
         torch_dtype=weight_dtype,
     )
-    pipeline.scheduler = UniPCMultistepScheduler.from_config(pipeline.scheduler.config)
+    pipeline.scheduler = PNDMScheduler.from_config(pipeline.scheduler.config)
     pipeline = pipeline.to(accelerator.device)
     pipeline.set_progress_bar_config(disable=True)
 
@@ -869,7 +870,7 @@ def main(args):
     text_encoder_cls = import_model_class_from_model_name_or_path(args.pretrained_model_name_or_path, args.revision)
 
     # Load scheduler and models
-    noise_scheduler = DDPMScheduler.from_pretrained(args.pretrained_model_name_or_path, subfolder="scheduler")
+    noise_scheduler = PNDMScheduler.from_pretrained(args.pretrained_model_name_or_path, subfolder="scheduler")
     text_encoder = text_encoder_cls.from_pretrained(
         args.pretrained_model_name_or_path, subfolder="text_encoder", revision=args.revision, variant=args.variant
     )
