@@ -70,31 +70,54 @@ def is_image(file):
 # newly added
 ###############################
 
+allow_degradation_dict = {
+    'hazy': True,
+    'low-light': True,
+    'motion-blurry': True,  # 值可以用于存储其他配置参数
+    # 'raindrop': True,
+    'rainy': True,
+    'shadowed': True,
+    # 'snowy': True,
+    # 'uncompleted': True,
+    # ...添加其他允许的类型
+}
+
+# 定义函数提取退化类型
+def extract_degradation_type(path):
+    parts = path.split('/')
+    if 'train' in parts:
+        train_index = parts.index('train') 
+    elif 'val' in parts:
+        train_index = parts.index('val')  # 找到train的位置
+    else:
+        raise ValueError(f"Invalid path: {path}, must have 'train' or 'val' in path")
+    return parts[train_index + 1]       # train下一级目录是退化类型
+
 # used to train image-to-text mapper
 class UnpairedLQHQDataset(Dataset):
     def __init__(self,
                  csv_path,  # <- 修改1：增加csv_path参数
-                 tokenizer,
+                 tokenizer=None,
                  size=512,
                  interpolation="bicubic",
                  placeholder_token="*",
-                 template="a photo of a {}"):
+                 template="a photo of a {}",
+                 max_sample=2000,):
         super(UnpairedLQHQDataset, self).__init__()
 
         # 修改2：从csv加载数据路径和标题
         self.df = pd.read_csv(csv_path, sep='\t')  # 假设csv用制表符分隔
 
-        # 定义函数提取退化类型
-        def extract_degradation_type(path):
-            parts = path.split('/')
-            train_index = parts.index('train')  # 找到train的位置
-            return parts[train_index + 1]       # train下一级目录是退化类型
+
 
         # 添加退化类型列
         self.df['degration_type'] = self.df['filepath'].apply(extract_degradation_type)
 
+        # 筛选退化类型
+        self.df = self.df[self.df['degration_type'].isin(allow_degradation_dict.keys())]
+
         # 按退化类型分组并取前2000条
-        self.df = self.df.groupby('degration_type').head(2000).reset_index(drop=True)
+        self.df = self.df.groupby('degration_type').head(max_sample).reset_index(drop=True)
 
         # 生成对应的GT路径
         self.df['GT_path'] = self.df['filepath'].str.replace('/LQ/', '/GT/')
@@ -198,13 +221,14 @@ class UnpairedLQHQDataset(Dataset):
                 placeholder_index = idx + 1
 
         example["index"] = torch.tensor(placeholder_index)
-        example["input_ids"] = self.tokenizer(
-            text,
-            padding="max_length",
-            truncation=True,
-            max_length=self.tokenizer.model_max_length,
-            return_tensors="pt"
-        ).input_ids[0]
+        if self.tokenizer is not None:
+            example["input_ids"] = self.tokenizer(
+                text,
+                padding="max_length",
+                truncation=True,
+                max_length=self.tokenizer.model_max_length,
+                return_tensors="pt"
+            ).input_ids[0]
 
         # 修改6：保留原有图像处理逻辑
         self.current_path = self.image_paths[i % self.num_images]
@@ -212,6 +236,8 @@ class UnpairedLQHQDataset(Dataset):
 
         self.current_path_gt = self.GT_paths[i % self.num_images]
         image_name_gt = self.current_path_gt.split('/')[-1].split(".")[0]
+
+        example["degration_type"] = extract_degradation_type(self.current_path)
 
         try:
             image = Image.open(self.current_path)
@@ -273,6 +299,7 @@ class UnpairedLQHQDataset(Dataset):
                 std=[0.5],
             )(torch_image)
 
+            example["pixel_values_normal"] = torch_image
             example["pixel_values"] = example["pixel_values_vae"]
             example["conditioning_pixel_values"] = example["pixel_values"]
 
@@ -280,6 +307,7 @@ class UnpairedLQHQDataset(Dataset):
                 mean=[0.5],
                 std=[0.5],
             )(torch_image_gt)
+            example["pixel_values_gt"] = example["pixel_values_vae_gt"]
 
 
             example["pixel_values_clip"] = torchvision.transforms.Compose( # the clip process input range should be [0, 1]

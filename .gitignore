@@ -1,2 +1,6 @@
 *.jpg
 *.png
+
+__pycache__
+
+experience/

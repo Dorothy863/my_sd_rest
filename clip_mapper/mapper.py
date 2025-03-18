@@ -15,6 +15,7 @@ class Mapper(nn.Module):
             mapper.load_state_dict(torch.load(args.i2t_mapper_path, map_location='cpu')) # if is pretrained, then use this line to load the pretrained mapper
         """
         super(Mapper, self).__init__()
+        self._is_mapper = True
 
         self.num_words = num_words
 

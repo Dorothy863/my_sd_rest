@@ -19,20 +19,38 @@
             "name": "Python: Train ControlNet",
             "type": "debugpy",
             "request": "launch",
-            "program": "train_controlnet.py",
+            "program": "${workspaceFolder}/train_controlnet_use_diffuser.py",
             "args": [
-                "--pretrained_model_name_or_path=/path/to/your/pretrained_model",
-                "--output_dir=./experience",
-                "--dataset_name=fusing/fill50k",
+                "--pretrained_model_name_or_path=/data/coding/upload-data/data/adrive/stable-diffusion-2-1-base",
+                "--clip_path=/data/coding/upload-data/data/adrive/CLIP-ViT-H-14-laion2B-s32B-b79K",
+                "--mapper_model_path=/data/coding/my_sd_rest/experience/checkpoint-42000/mapper/mapper.pt",
+                "--train_data_dir=/data/coding/daclip_train.csv",
+                "--test_data_dir=/data/coding/daclip_val.csv",
+                "--output_dir=${workspaceFolder}/experience",
+                "--logging_dir=logs",
+                // "--dataset_name=fusing/fill50k",
                 "--resolution=512",
-                "--learning_rate=1e-5",
-                "--validation_image",
-                "./conditioning_image_1.png",
-                "./conditioning_image_2.png",
+                "--learning_rate=1e-6",
+                "--checkpointing_steps=2000",
+                "--validation_steps=500",
+                "--num_train_epochs=100",
+                "--checkpoints_total_limit=5",
+                "--num_validation_images=2",
+                // "--validation_image",
+                // "${workspaceFolder}/001.png", // Rainy
+                // "${workspaceFolder}/3.jpg", // Haze
+                // "${workspaceFolder}/GOPR0384_11_00_000003.png", // Blur
+                // "${workspaceFolder}/23.png", // LOL
+                // "${workspaceFolder}/4_rain.png", // RainDrop
+                // "${workspaceFolder}/_MG_3067.jpg", // shadow
+                // "${workspaceFolder}/beautiful_smile_00007.jpg", // snow
+                // "${workspaceFolder}/00093.jpg", // uncomplete
                 // "--validation_prompt",
                 // "red circle with blue background",
-                "--train_batch_size=1",
-                "--gradient_accumulation_steps=4"
+                "--train_batch_size=2",
+                "--gradient_accumulation_steps=2",
+                "--controlnet_model_name_or_path=/data/coding/my_sd_rest/experience/checkpoint-42000/controlnet",
+                "--vae_model_name_or_path=/data/coding/my_sd_rest/experience/checkpoint-42000/vae",
             ],
             "env": {
                 "PYTHONPATH": "${workspaceFolder}"
@@ -40,6 +58,69 @@
             "cwd": "${workspaceFolder}",
             "console": "integratedTerminal",
             "justMyCode": false,
-        }
+        },
+        {
+            "name": "Python: Train Mapper",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/train_mapper_use_diffuser.py",
+            "args": [
+                "--pretrained_model_name_or_path=/data/coding/upload-data/data/adrive/stable-diffusion-2-1-base",
+                "--clip_path=/data/coding/upload-data/data/adrive/CLIP-ViT-H-14-laion2B-s32B-b79K",
+                "--mapper_model_path=/data/coding/my_sd_rest/experience/mapper_checkpoint-3000/mapper/mapper.pt",
+                "--train_data_dir=/data/coding/daclip_train.csv",
+                "--test_data_dir=/data/coding/daclip_val.csv",
+                "--output_dir=${workspaceFolder}/experience",
+                "--logging_dir=logs",
+
+                "--resolution=512",
+                "--learning_rate=1e-6",
+                "--checkpointing_steps=1000",
+                "--validation_steps=500",
+                "--num_train_epochs=100",
+                "--checkpoints_total_limit=5",
+                "--num_validation_images=2",
+
+                "--train_batch_size=4",
+                "--gradient_accumulation_steps=1",
+                // "--controlnet_model_name_or_path=/data/coding/my_sd_rest/experience/checkpoint-42000/controlnet",
+                // "--vae_model_name_or_path=/data/coding/my_sd_rest/experience/checkpoint-42000/vae",
+            ],
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}"
+            },
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+        },
+        {
+            "name": "Python: Train VAE",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/train_vae_diffuser.py",
+            "args": [
+                // "--pretrained_model_name_or_path=/data/coding/upload-data/data/adrive/stable-diffusion-2-1-base",
+                "--pretrained_model_name_or_path=/data/coding/vae_checkpoint-16000",
+                "--output_dir=./experience",
+                "--logging_dir=logs",
+                "--train_data_dir=/data/coding/daclip_train.csv",
+                "--test_data_dir=/data/coding/daclip_val.csv",
+                "--resolution=512",
+                "--learning_rate=1e-4",
+
+                "--checkpointing_steps=2000",
+                "--validation_steps=100",
+                "--num_train_epochs=100",
+
+                "--train_batch_size=4",
+                "--gradient_accumulation_steps=1"
+            ],
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}"
+            },
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+        },
     ]
 }

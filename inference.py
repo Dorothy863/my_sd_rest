@@ -1,5 +1,5 @@
-from diffusers import StableDiffusionPipeline, ControlNetModel
-from transformers import CLIPTextModel, CLIPTokenizer
+from diffusers import StableDiffusionPipeline, ControlNetModel, AutoencoderKL, UNet2DConditionModel
+from transformers import CLIPTextModel, CLIPTokenizer, CLIPVisionModel
 import torch
 from typing import Optional, Dict, Any, Union, List, Callable
 from PIL import Image
@@ -117,11 +117,6 @@ class CustomStableDiffusion(StableDiffusionPipeline):
             # 在此注入ControlNet处理逻辑
             kwargs.update({"controlnet_cond": control_image})
         
-        # 处理预编译embedding
-        if embedding_cache_key:
-            prompt_embeds, negative_prompt_embeds = self.precompiled_embeddings[embedding_cache_key]
-            prompt = None  # 必须清空原始prompt
-
         with autocast(enabled=True):
             # 调用父类实现
             return super().__call__(
@@ -145,12 +140,48 @@ class CustomStableDiffusion(StableDiffusionPipeline):
                 **kwargs
             )
 
-seed = 114514
-generator = torch.Generator(device='cuda').manual_seed(seed)
+# seed = 114514
+# generator = torch.Generator(device='cuda').manual_seed(seed)
+
+
+sd_path = "/data/coding/upload-data/data/adrive/stable-diffusion-2-1-base"
+clip_path = "/data/coding/upload-data/data/adrive/CLIP-ViT-H-14-laion2B-s32B-b79K"
+# DIY
+vae_path = "/data/coding/ori_checkpoing-26000/vae/"
+
+
+vae = AutoencoderKL.from_pretrained(vae_path).to("cuda")
+unet = UNet2DConditionModel.from_pretrained(sd_path, subfolder="unet").to("cuda")
+
+text_encoder = CLIPTextModel.from_pretrained(sd_path, subfolder="text_encoder").to("cuda")
+
+mapper_path = "/data/coding/mapper_024000.pt"
+from clip_mapper.mapper import Mapper
+mapper = Mapper(input_dim=1280, output_dim=1024, num_words=20).to('cuda')
+mapper = mapper.prepare_mapper_with_unet(unet)
+mapper.load_state_dict(torch.load(mapper_path))
+
+from use_mapper_test import inj_forward_text
+# 替换前向的更稳健方式
+orig_text_forward = text_encoder.text_model.forward
+def custom_forward(*args, **kwargs):
+    if isinstance(kwargs['input_ids'], dict):
+        if "inj_embedding" in kwargs['input_ids']:
+            return inj_forward_text(*args, **kwargs)
+        else:
+            raise ValueError("inj_embedding not found in input_ids")
+    else:
+        return orig_text_forward(**kwargs)
+for _module in text_encoder.modules():
+    if _module.__class__.__name__ == "CLIPTextTransformer":
+        _module.__class__.__call__ = custom_forward
 
 # 使用半精度优化
 pipeline = CustomStableDiffusion.from_pretrained(
-    "/workspace/sd_models/stable-diffusion-2-1-base",
+    sd_path,
+    vae=vae,
+    unet=unet,
+    text_encoder=text_encoder,
     torch_dtype=torch.float32  
 ).to("cuda")
 
@@ -161,37 +192,77 @@ pipeline.add_extension(
 )
 
 
+batch = {}
+
 # 读取LQ文件
 from processor.image_processor import process_image
-lq_path = "/workspace/datasets/SD_Rest/val/motion-blurry/LQ/GOPR0384_11_00_000001.png"
+lq_path = "0327.png"
 # lq_path = "/workspace/datasets/SD_Rest/val/motion-blurry/GT/GOPR0384_11_00_000001.png"
 lq_image = process_image(lq_path).to('cuda')
 
 # save the tensor image
 # convert tensor to PIL image
 input_image = pipeline.image_processor.postprocess(lq_image.detach(), output_type="pil", do_denormalize=[True] * lq_image.shape[0])[0]
-input_image.save("input_image.jpg")
+input_image.save("0327_input.png")
 
 # 生成LQ的VAE嵌入
 vae_embedding = pipeline.vae.encode(
     lq_image,
 )
-begin_latents = vae_embedding[0].sample() * pipeline.vae.config.scaling_factor
+begin_latents = vae_embedding[0].mode() * pipeline.vae.config.scaling_factor
 
-begin_image = pipeline.vae.decode(begin_latents / pipeline.vae.config.scaling_factor, return_dict=False, generator=generator)[
-                0
-            ]
+begin_image = pipeline.vae.decode(begin_latents / pipeline.vae.config.scaling_factor, return_dict=False)[0]
 begin_image = pipeline.image_processor.postprocess(begin_image.detach(), output_type="pil", do_denormalize=[True] * begin_image.shape[0])[0]
 begin_image = begin_image.save("begin_image.jpg")
 
 
 
+clip_image_encoder = CLIPVisionModel.from_pretrained(clip_path).to("cuda")
+tokenizer = CLIPTokenizer.from_pretrained(sd_path, subfolder="tokenizer")
+with torch.no_grad():
+    # 提取图像特征
+    batch['pixel_values_clip'] = (lq_image + 1) / 2
+    batch['pixel_values_clip'] = transforms.Compose([
+        transforms.Resize((224, 224)),
+        transforms.Normalize(
+            mean=[0.48145466, 0.4578275, 0.40821073],
+            std=[0.26862954, 0.26130258, 0.27577711]
+        )
+    ])(batch['pixel_values_clip'])
+    image_features = [clip_image_encoder(batch['pixel_values_clip'], output_hidden_states=True).last_hidden_state]
+    image_embeddings = [emb.detach() for emb in image_features]
+    # 通过mapper生成嵌入
+    inj_embedding = mapper(image_embeddings)
+
+    batch["input_ids"] = tokenizer(
+        "a photo of S",
+        padding="max_length",
+        truncation=True,
+        max_length=tokenizer.model_max_length,
+        return_tensors="pt"
+    ).input_ids
+
+# 确定占位符位置 (新增部分)
+words = "a photo of S".strip().split(' ')
+placeholder_index = words.index('S') + 1  # +1 因为CLIP添加了开始token
+
+# 构造注入输入
+text_input = {
+    "input_ids": batch["input_ids"].to('cuda'),
+    "inj_embedding": inj_embedding.to('cuda'),
+    "inj_index": torch.tensor([placeholder_index]).to('cuda')  # 假设固定注入位置
+}
+
+# 替换原来的文本编码器调用
+prompt_embeds = text_encoder(text_input, return_dict=False)[0]
+
 # 生成时进一步优化
 image = pipeline(
-    "people walking on a city street with a lot of buildings",
-    num_inference_steps=28,
+    # "A seal roars in the sea",
+    num_inference_steps=50,
     guidance_scale=5,
-    latents=begin_latents,
+    # latents=begin_latents,
+    prompt_embeds=prompt_embeds
 )
 # 保存生成结果
 image.images[0].save("generated_image.jpg")
