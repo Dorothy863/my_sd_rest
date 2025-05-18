@@ -108,8 +108,6 @@ class UnpairedLQHQDataset(Dataset):
         # 修改2：从csv加载数据路径和标题
         self.df = pd.read_csv(csv_path, sep='\t')  # 假设csv用制表符分隔
 
-
-
         # 添加退化类型列
         self.df['degration_type'] = self.df['filepath'].apply(extract_degradation_type)
 

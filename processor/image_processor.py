@@ -2,7 +2,7 @@ import PIL
 from PIL import Image
 import torchvision.transforms as transforms
 
-def process_image(input_path, target_size=512):
+def process_image(input_path: str, target_size=512):
     """
     改进后的图像处理流程，对齐训练数据集预处理
     
