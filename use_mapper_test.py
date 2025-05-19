@@ -9,8 +9,21 @@ from transformers.utils import (
     replace_return_docstrings,
 )
 from transformers.models.clip.configuration_clip import CLIPTextConfig
-from transformers.models.clip.modeling_clip import CLIP_TEXT_INPUTS_DOCSTRING, _expand_mask
+from transformers.models.clip.modeling_clip import CLIP_TEXT_INPUTS_DOCSTRING
 
+# Copied from transformers.models.bart.modeling_bart._expand_mask
+def _expand_mask(mask: torch.Tensor, dtype: torch.dtype, tgt_len: Optional[int] = None):
+    """
+    Expands attention_mask from `[bsz, seq_len]` to `[bsz, 1, tgt_seq_len, src_seq_len]`.
+    """
+    bsz, src_len = mask.size()
+    tgt_len = tgt_len if tgt_len is not None else src_len
+
+    expanded_mask = mask[:, None, None, :].expand(bsz, 1, tgt_len, src_len).to(dtype)
+
+    inverted_mask = 1.0 - expanded_mask
+
+    return inverted_mask.masked_fill(inverted_mask.to(torch.bool), torch.finfo(dtype).min)
 
 @add_start_docstrings_to_model_forward(CLIP_TEXT_INPUTS_DOCSTRING)
 @replace_return_docstrings(output_type=BaseModelOutputWithPooling, config_class=CLIPTextConfig)

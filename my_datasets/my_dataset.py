@@ -72,11 +72,11 @@ def is_image(file):
 
 allow_degradation_dict = {
     'hazy': True,
-    'low-light': True,
-    'motion-blurry': True,  # 值可以用于存储其他配置参数
+    # 'low-light': True,
+    # 'motion-blurry': True,  # 值可以用于存储其他配置参数
     # 'raindrop': True,
-    'rainy': True,
-    'shadowed': True,
+    # 'rainy': True,
+    # 'shadowed': True,
     # 'snowy': True,
     # 'uncompleted': True,
     # ...添加其他允许的类型
@@ -102,7 +102,7 @@ class UnpairedLQHQDataset(Dataset):
                  interpolation="bicubic",
                  placeholder_token="*",
                  template="a photo of a {}",
-                 max_sample=2000,):
+                 max_sample=20000,):
         super(UnpairedLQHQDataset, self).__init__()
 
         # 修改2：从csv加载数据路径和标题
@@ -338,6 +338,249 @@ class UnpairedLQHQDataset(Dataset):
 
             example["pixel_values_clip"] = self.get_tensor_clip()(ref_image_tensor)
             """
+
+            example["image_name"] = image_name
+
+        except Exception as e:
+
+            example["pixel_values"] = torch.zeros((3, 512, 512))
+            example["pixel_values_clip"] = torch.zeros((3, 224, 224))
+
+            example["image_name"] = image_name
+
+            print("Bad Image Path", self.current_path)
+
+        return example
+    
+
+# used to train image-to-text mapper
+class LQHQDataset(Dataset):
+    def __init__(self,
+                 dataset_path,  # 指向datasets文件夹，
+                 tokenizer=None,
+                 size=512,
+                 interpolation="bicubic",
+                 placeholder_token="*",
+                 template="{}",
+                 max_sample=2000,):
+        super(LQHQDataset, self).__init__()
+
+        # 遍历dataset_path下的所有文件，文件路径格式为dataset_path/退化类型/[LQ/GT]//文件名
+        # 例如：/workspace/datasets/SD_Rest/train/hazy/LQ/0001.jpg
+        self.image_paths = []
+        self.GT_paths = []
+        self.degradation_types = []
+
+        for degradation_type in os.listdir(dataset_path):
+            degradation_path = os.path.join(dataset_path, degradation_type, "LQ")
+            if not os.path.isdir(degradation_path):
+                continue
+
+            for file_name in os.listdir(degradation_path):
+                if is_image(file_name):
+                    lq_path = os.path.join(degradation_path, file_name)
+                    gt_path = lq_path.replace("/LQ/", "/GT/")
+                    self.image_paths.append(lq_path)
+                    self.GT_paths.append(gt_path)
+                    self.degradation_types.append(degradation_type)
+
+        # 创建一个DataFrame来存储图像路径和退化类型
+        self.df = pd.DataFrame({
+            'filepath': self.image_paths,
+            'degration_type': self.degradation_types
+        })
+
+        # 筛选退化类型
+        self.df = self.df[self.df['degration_type'].isin(allow_degradation_dict.keys())]
+
+        # 按退化类型分组并取前max_sample条
+        self.df = self.df.groupby('degration_type').head(max_sample).reset_index(drop=True)
+
+        # 更新图像路径和退化类型列表
+        self.image_paths = self.df['filepath'].tolist()
+        self.degradation_types = self.df['degration_type'].tolist()
+
+        # 生成对应的GT路径
+        self.df['GT_path'] = self.df['filepath'].str.replace('/LQ/', '/GT/')
+        self.GT_paths = self.df['GT_path'].tolist() # 添加GT路径
+
+
+        # Update paths based on new base directory
+        # self.image_paths = [p.replace("/workspace/datasets/SD_Rest", "/data/coding") for p in self.image_paths]
+        # self.GT_paths = [p.replace("/workspace/datasets/SD_Rest", "/data/coding") for p in self.GT_paths]
+
+
+        # 修改3：调整类成员变量
+        self.num_images = len(self.image_paths)
+        self._length = self.num_images
+        self.tokenizer = tokenizer
+        self.size = size
+        self.interpolation = {
+            "linear": PIL_INTERPOLATION["linear"],
+            "bilinear": PIL_INTERPOLATION['bilinear'],
+            "bicubic": PIL_INTERPOLATION["bicubic"],
+            "lanczos": PIL_INTERPOLATION["lanczos"]
+        }[interpolation]
+
+        
+        # 废弃原来的路径收集逻辑
+        # self.dataroot_list = dataroot_list
+        # self.image_paths = []
+        # for dataroot in self.dataroot_list:
+        #     self.image_paths.extend(sorted(glob.glob(os.path.join(dataroot, "*"))))
+        self.placeholder_token = placeholder_token
+        self.template = template
+        self.patch_size = size
+        """
+        self.tokenizer = tokenizer
+        self.size = size
+
+        self.num_images = len(self.image_paths)
+        self._length = self.num_images
+
+        self.interpolation = {
+            "linear": PIL_INTERPOLATION["linear"],
+            "bilinear": PIL_INTERPOLATION['bilinear'],
+            "bicubic": PIL_INTERPOLATION["bicubic"],
+            "lanczos": PIL_INTERPOLATION["lanczos"]
+        }[interpolation]
+
+        """
+
+    def __len__(self):
+        return self._length
+
+    def get_tensor_clip(self, normalize=True, toTensor=True):
+        transform_list = []
+        if toTensor:
+            transform_list += [torchvision.transforms.ToTensor()]
+
+        if normalize:
+            transform_list += [torchvision.transforms.Normalize((0.48145466, 0.4578275, 0.40821073),
+                                                                (0.26862954, 0.26130258, 0.27577711))]
+
+        return torchvision.transforms.Compose(transform_list)
+
+    def process(self, image):
+
+        img = cv2.resize(image, (self.size, self.size), interpolation=cv2.INTER_CUBIC)
+
+        img = np.array(img).astype(np.float32)
+        img = img / 127.5 - 1.0
+        return torch.from_numpy(img).permute(2, 0, 1)
+
+    def __getitem__(self, i):
+
+        ###############################################################
+        example = {}
+
+        placeholder_string = self.placeholder_token
+        text = self.template.format(placeholder_string)
+        # text = self.title_templates[i % self.num_images].format(placeholder_string)
+        example["text"] = text
+
+        placeholder_index = 0
+        words = text.strip().split(' ')
+        for idx, word in enumerate(words):
+            if word == placeholder_string:
+                placeholder_index = idx + 1
+
+        example["index"] = torch.tensor(placeholder_index)
+        if self.tokenizer is not None:
+            example["input_ids"] = self.tokenizer(
+                text,
+                padding="max_length",
+                truncation=True,
+                max_length=self.tokenizer.model_max_length,
+                return_tensors="pt"
+            ).input_ids[0]
+
+        # 修改6：保留原有图像处理逻辑
+        self.current_path = self.image_paths[i % self.num_images]
+        image_name = self.current_path.split('/')[-1].split(".")[0]
+
+        self.current_path_gt = self.GT_paths[i % self.num_images]
+        image_name_gt = self.current_path_gt.split('/')[-1].split(".")[0]
+
+        example["degration_type"] = extract_degradation_type(self.current_path)
+
+        try:
+            image = Image.open(self.current_path)
+        
+            if not image.mode == "RGB":
+                image = image.convert("RGB")
+
+
+            image_gt = Image.open(self.current_path_gt)
+        
+            if not image_gt.mode == "RGB":
+                image_gt = image_gt.convert("RGB")
+
+            H, W = image.size
+            # 定义通用预处理（排除 RandomCrop）
+            process = []
+
+            # 需要裁剪时
+            if H >= self.patch_size and W >= self.patch_size:
+                # 获取随机裁剪参数
+                i, j, h, w = transforms.RandomCrop.get_params(
+                    image, output_size=(self.patch_size, self.patch_size)
+                )
+                
+                # 对两个图像应用相同的裁剪坐标
+                process += transforms.Lambda(lambda x: transforms.functional.crop(x, i, j, h, w)),
+                # process += transforms.Crop(image, i, j, h, w)
+                
+                # 统一缩放到最终尺寸
+                # process += torchvision.transforms.Resize(self.size, interpolation=self.interpolation),
+            else:
+                # 小图直接中心裁剪+缩放
+                process += torchvision.transforms.Resize(self.size, interpolation=self.interpolation),
+                process += torchvision.transforms.CenterCrop(self.size),
+            
+            process += torchvision.transforms.ToTensor(),
+            process = torchvision.transforms.Compose(process)
+            # 转换为 Tensor
+            torch_image = process(image)
+            torch_image_gt = process(image_gt)
+
+            # 如果退化类型为 "low-light"，对 LQ 图像做亮度均衡化（直方图均衡化）
+            if example["degration_type"] == "low-light":
+                # 1) 将 Tensor [C,H,W] 转为 numpy [H,W,C] uint8
+                np_img = (torch_image.permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
+
+                # 2) 转为 HSV，对 V 通道做直方图均衡化
+                hsv = cv2.cvtColor(np_img, cv2.COLOR_RGB2HSV)
+                hsv[:, :, 2] = cv2.equalizeHist(hsv[:, :, 2])
+
+                # 3) 转回 RGB 并归一化到 [0,1]
+                eq_rgb = cv2.cvtColor(hsv, cv2.COLOR_HSV2RGB)
+                torch_image = torch.from_numpy(eq_rgb.astype(np.float32) / 255.0).permute(2, 0, 1)
+
+            # example["pixel_values"] = torch_image
+            example["pixel_values_vae"] = torchvision.transforms.Normalize(
+                mean=[0.5],
+                std=[0.5],
+            )(torch_image)
+
+            example["pixel_values_normal"] = torch_image
+            example["pixel_values"] = example["pixel_values_vae"]
+            example["conditioning_pixel_values"] = example["pixel_values"]
+
+            example["pixel_values_vae_gt"] = torchvision.transforms.Normalize( # 归一化到[-1,1]
+                mean=[0.5],
+                std=[0.5],
+            )(torch_image_gt)
+            example["pixel_values_gt"] = example["pixel_values_vae_gt"]
+
+            example["pixel_values_clip"] = torchvision.transforms.Compose( # the clip process input range should be [0, 1]
+                [torchvision.transforms.Resize((224, 224), interpolation=self.interpolation),
+                    torchvision.transforms.Normalize(
+                        mean=[0.48145466, 0.4578275, 0.40821073],
+                        std=[0.26862954, 0.26130258, 0.27577711]
+                    )
+                    ]
+            )(torch_image)
 
             example["image_name"] = image_name
 
