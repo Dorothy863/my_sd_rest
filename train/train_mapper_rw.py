@@ -122,7 +122,7 @@ def log_validation(
     else:
         generator = torch.Generator(device=accelerator.device).manual_seed(args.seed)
 
-    base_text = "a photo of {}"
+    base_text = "{}"
     placeholder = "S"
     validation_text = base_text.format(placeholder)
     
@@ -153,27 +153,6 @@ def log_validation(
                 ]
             )
         return image_transforms(image).to(accelerator.device)
-
-    """if len(args.validation_image) == 1:
-        validation_images = args.validation_image
-        validation_prompts = validation_text
-    else:
-        # validation_images = args.validation_image
-        validation_images = args.validation_image
-        validation_prompts = [validation_text] * len(args.validation_image)
-    if len(args.validation_image) == len(args.validation_prompt):
-        validation_images = args.validation_image
-        validation_prompts = args.validation_prompt
-    elif len(args.validation_image) == 1:
-        validation_images = args.validation_image * len(args.validation_prompt)
-        validation_prompts = args.validation_prompt
-    elif len(args.validation_prompt) == 1:
-        validation_images = args.validation_image
-        validation_prompts = args.validation_prompt * len(args.validation_image)
-    else:
-        raise ValueError(
-            "number of `args.validation_image` and `args.validation_prompt` should be checked in `parse_args`"
-        )"""
 
     image_logs = []
     inference_ctx = contextlib.nullcontext() if is_final_validation else torch.autocast("cuda")
@@ -234,7 +213,7 @@ def log_validation(
         images = []
 
         with inference_ctx:
-            # vae_latents = vae.encode(processed_image).latent_dist.mode() * vae.config.scaling_factor
+            # vae_latents = vae.encode(processed_image).latent_dist.mode() * vae.config.scaling_factor 
             vae_embeding = vae.encode(processed_image).latent_dist.mode() 
             vae_embeding_gt = vae.encode(validation_image_gt).latent_dist.mode() 
             
@@ -247,13 +226,13 @@ def log_validation(
             images.append(validation_image_gt)
             # validation_image_gt.save(os.path.join(now_save_path, 'gt', f"batch_{idx}.png"))
 
-            vae_result = vae.decode(vae_embeding, cross_emb=vae_embeding).sample.clamp(-1, 1)
+            vae_result = vae.decode(vae_embeding).sample.clamp(-1, 1)
             image_vae = (vae_result + 1) / 2
             image_vae = transforms.functional.to_pil_image(image_vae[0])
             images.append(image_vae)
             # image_vae.save(os.path.join(now_save_path, 'vae', f"batch_{idx}.png"))
 
-            vae_result_gt = vae.decode(vae_embeding_gt, cross_emb=vae_embeding).sample.clamp(-1, 1)
+            vae_result_gt = vae.decode(vae_embeding_gt).sample.clamp(-1, 1)
             image_vae_gt = (vae_result_gt + 1) / 2
             image_vae_gt = transforms.functional.to_pil_image(image_vae_gt[0])
             images.append(image_vae_gt)
@@ -263,13 +242,13 @@ def log_validation(
                 # 使用生成的嵌入 (修改部分)
                 image = pipeline(
                     # validation_prompt=None,  # 使用嵌入时不需文本提示
-                    image=processed_image,
+                    # image=processed_image,
                     prompt_embeds=prompt_embeds,
                     num_inference_steps=50,
                     guidance_scale=7.5,
                     generator=generator,
                     # latents=vae_embeding * vae.config.scaling_factor,
-                    vae_embeding=vae_embeding,
+                    # vae_embeding=vae_embeding,
                 ).images[0]
 
                 images.append(image)
@@ -859,7 +838,7 @@ def main(args):
 
     # 加载预训练mapper和图像编码器
     mapper = Mapper(input_dim=1280, output_dim=1024, num_words=20).to(accelerator.device)
-    mapper = mapper.prepare_mapper_with_unet(unet)
+    # mapper = mapper.prepare_mapper_with_unet(unet)
 
     if args.mapper_model_path is not None:
         mapper.load_state_dict(torch.load(args.mapper_model_path))
@@ -918,7 +897,6 @@ def main(args):
                     else:
                         raise ValueError("Unknown model type encountered.")  # provide a meaningful error message
                     
-                    
                     logger.info(f"Saved {sub_dir} to {model_save_path}")
 
         def load_model_hook(models, input_dir):
@@ -955,30 +933,9 @@ def main(args):
     text_encoder.requires_grad_(False)
     clip_image_encoder.requires_grad_(False)
     
-    vae.decoder.requires_grad_(False)
-    vae.decoder.eval()
-    mapper.requires_grad_(True)
-    # mapper.eval()
+    # vae.decoder.requires_grad_(False)
+    # mapper.requires_grad_(False)
     mapper.train()
-
-    if args.enable_xformers_memory_efficient_attention:
-        if is_xformers_available():
-            import xformers
-
-            xformers_version = version.parse(xformers.__version__)
-            if xformers_version == version.parse("0.0.16"):
-                logger.warning(
-                    "xFormers 0.0.16 cannot be used for training in some GPUs. If you observe problems during training, please update xFormers to at least 0.0.17. See https://huggingface.co/docs/diffusers/main/en/optimization/xformers for more details."
-                )
-            unet.enable_xformers_memory_efficient_attention()
-        else:
-            raise ValueError("xformers is not available. Make sure it is installed correctly")
-
-    # Check that all trainable models are in full precision
-    low_precision_error_string = (
-        " Please make sure to always have all model weights in full float32 precision when starting training - even if"
-        " doing mixed precision training, copy of the weights should still be float32."
-    )
 
     # Enable TF32 for faster training on Ampere GPUs,
     # cf https://pytorch.org/docs/stable/notes/cuda.html#tensorfloat-32-tf32-on-ampere-devices
@@ -1013,32 +970,21 @@ def main(args):
         eps=args.adam_epsilon,
     )
 
+    from my_datasets.my_dataset import LQHQDataset
 
-
-    """train_dataset = make_train_dataset(args, tokenizer, accelerator)
-    train_dataloader = torch.utils.data.DataLoader(
-        train_dataset,
-        shuffle=True,
-        collate_fn=collate_fn,
-        batch_size=args.train_batch_size,
-        num_workers=args.dataloader_num_workers,
-    )"""
-
-    from my_datasets.my_dataset import UnpairedLQHQDataset
-
-    train_dataset = UnpairedLQHQDataset(
-        csv_path=args.train_data_dir,  # 替换为实际路径
+    train_dataset = LQHQDataset(
+        dataset_path=args.train_data_dir,  # 替换为实际路径
         tokenizer=tokenizer,
         size=args.resolution,
         placeholder_token="S"
     )
 
-    test_dataset = UnpairedLQHQDataset(
-        csv_path=args.test_data_dir,  # 替换为实际路径
+    test_dataset = LQHQDataset(
+        dataset_path=args.test_data_dir,  # 替换为实际路径
         tokenizer=tokenizer,
         size=args.resolution,
         placeholder_token="S",
-        max_sample=20,
+        max_sample=5,
     )
 
     train_dataloader = torch.utils.data.DataLoader(
@@ -1158,7 +1104,6 @@ def main(args):
         for step, batch in enumerate(train_dataloader):
             with accelerator.accumulate([
                 mapper, 
-                # vae.decoder
                 ]):
 
                 if step == 0 and global_step==initial_global_step :  # test the first step
@@ -1176,46 +1121,14 @@ def main(args):
                         test_dataloader = test_dataloader,
                     )
 
-                # Convert images to latent space
-                latents_lq = vae.encode(batch["pixel_values"].to(dtype=weight_dtype)).latent_dist.mode() # * vae.config.scaling_factor
-                latents_hq = vae.encode(batch["pixel_values_vae_gt"].to(dtype=weight_dtype)).latent_dist.mode()
-
-                latents = latents_hq * vae.config.scaling_factor # the input to unet
-
-                # Sample noise that we'll add to the latents
-                noise = torch.randn_like(latents)
-                bsz = latents.shape[0]
-                # Sample a random timestep for each image
-                # timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (bsz,), device=latents.device)
-                timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (1,), device=latents.device).expand(bsz)
-                timesteps = timesteps.long()
-
-                # Add noise to the latents according to the noise magnitude at each timestep
-                # (this is the forward diffusion process)
-                noise_scheduler_result = noise_scheduler.add_noise(latents.float(), noise.float(), timesteps)
-                noisy_latents = noise_scheduler_result["noisy_samples"].to(
-                    dtype=weight_dtype
-                )
-
-                # clip-vision image pre-process
-                clip_vision_process = transforms.Compose( # the clip process input range should be [0, 1]
-                    [transforms.Resize((224, 224)),
-                        transforms.Normalize(
-                            mean=[0.48145466, 0.4578275, 0.40821073],
-                            std=[0.26862954, 0.26130258, 0.27577711]
-                        )
-                        ]
-                )
-
-                # 修改原始的文本编码部分
                 # with torch.no_grad():
                 # 提取图像特征
-                image_features = [clip_image_encoder(clip_vision_process((batch["pixel_values"]+1)/2),output_hidden_states=True).last_hidden_state]
+                image_features = [clip_image_encoder(batch['pixel_values_clip'],output_hidden_states=True).last_hidden_state]
                 image_embeddings = [emb.detach() for emb in image_features]
                 # 通过mapper生成嵌入
                 inj_embedding = mapper(image_embeddings)
                 
-                words = "a photo of S".strip().split(' ')
+                words = "S".strip().split(' ')
                 placeholder_index = words.index('S') + 1  # +1 因为CLIP添加了开始token
 
                 # 构造注入输入
@@ -1228,65 +1141,70 @@ def main(args):
                 # 替换原来的文本编码器调用
                 encoder_hidden_states = text_encoder(text_input, return_dict=False)[0]
 
-                """
-                # Get the text embedding for conditioning
-                encoder_hidden_states = text_encoder(batch["input_ids"], return_dict=False)[0]
-                """
-
-                # Predict the noise residual
-                model_pred = unet(
-                    noisy_latents,
-                    timesteps,
-                    encoder_hidden_states=encoder_hidden_states,
-                    return_dict=False,
-                )[0]
-
-                # recompute the latents using model_pred
-                noise_scheduler.set_timesteps(num_inference_steps=50, device=accelerator.device)
-
-                # result_latents = noise_scheduler.step(model_pred, timesteps[0], latents, return_dict=True)
-                # result_latents = result_latents["pred_original_sample"]
-                # result_decoder = vae.decode(result_latents * vae.config.scaling_factor, cross_emb=latents_lq).sample
-
-                # with torch.no_grad():
-                #     result_decoder_lq = vae.decode(latents_lq, cross_emb=latents_lq).sample
-                #     result_decoder_hq = vae.decode(latents_hq, cross_emb=latents_hq).sample
-
-                # Get the target for loss depending on the prediction type
-                if noise_scheduler.config.prediction_type == "epsilon":
-                    target = noise
-                elif noise_scheduler.config.prediction_type == "v_prediction":
-                    target = noise_scheduler.get_velocity(latents, noise, timesteps)
-                else:
-                    raise ValueError(f"Unknown prediction type {noise_scheduler.config.prediction_type}")
+                # Convert images to latent space
+                latents_lq = vae.encode(batch["pixel_values"].to(dtype=weight_dtype)).latent_dist.mode() # * vae.config.scaling_factor
+                # Convert VAE outputs into initial noisy latents via iterative sampling instead of single-step noise prediction
+                latents_hq = vae.encode(batch["pixel_values_vae_gt"].to(dtype=weight_dtype)).latent_dist.mode()
                 
-                loss_mse_noise = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
-                # loss_mse_vae = F.mse_loss(result_decoder, batch["pixel_values_vae_gt"].to(dtype=weight_dtype), reduction="mean")
-                # loss_l1_vae = F.l1_loss(result_decoder, batch["pixel_values_vae_gt"].to(dtype=weight_dtype), reduction="mean")
-                # loss_lpips = lpips_loss_fn(result_decoder, batch["pixel_values_vae_gt"].to(dtype=weight_dtype)).mean()
-                # loss_fft = fft_loss(result_decoder, batch["pixel_values_vae_gt"].to(dtype=weight_dtype))
+                latents = latents_lq * vae.config.scaling_factor # the input to unet
 
-                scale_loss_mse_noise = 1
-                scale_loss_mse_vae = scale_loss_mse_noise / 48
-                scale_loss_l1_vae = scale_loss_mse_vae * 10
-                scale_loss_lpips = scale_loss_mse_vae # / 10
-                scale_loss_fft = scale_loss_mse_vae / 100
+                # Sample noise that we'll add to the latents
+                noise = torch.randn_like(latents)
 
-                loss = (scale_loss_mse_noise * loss_mse_noise 
-                        # + scale_loss_mse_vae * loss_mse_vae
-                        # + scale_loss_lpips * loss_lpips 
-                        # + scale_loss_l1_vae * loss_l1_vae 
-                        # + scale_loss_fft * loss_fft
+                bsz = latents.shape[0]
+                # Sample a random timestep for each image
+                timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (1,), device=latents.device).expand(bsz)
+                timesteps = timesteps.long()
+
+                # iterative denoising and decode
+                # latents_hq = vae.encode(batch["pixel_values_vae_gt"].to(dtype=weight_dtype)).latent_dist.mode() * vae.config.scaling_factor
+                noise_scheduler.set_timesteps(50, device=accelerator.device)
+                timesteps = noise_scheduler.timesteps
+
+                # add_noise
+                begin_timestep = 0 # use 0 or 30
+                time_add = timesteps[begin_timestep].long().expand(bsz)
+                noise_scheduler_result = noise_scheduler.add_noise(latents.float(), noise.float(), time_add)
+                latents = noise_scheduler_result.to(dtype=weight_dtype)
+
+                mid_timestep = random.randint(40, 49)
+                for t in timesteps[begin_timestep: mid_timestep]:
+                    with torch.no_grad():
+                        latent_model_input = latents
+                        latent_model_input = noise_scheduler.scale_model_input(latent_model_input, t)
+                        noise_pred = unet(latent_model_input, t, encoder_hidden_states=encoder_hidden_states).sample
+                        latents = noise_scheduler.step(noise_pred, t, latents).prev_sample
+                t = timesteps[mid_timestep].long().expand(bsz)
+                latent_model_input = noise_scheduler.scale_model_input(latents, t)
+                noise_pred = unet(latent_model_input, t, encoder_hidden_states=encoder_hidden_states).sample
+                pred_original = noise_scheduler.step(noise_pred, t[0], latents).pred_original_sample.to(weight_dtype)
+                pred_original = 1 / vae.config.scaling_factor * pred_original 
+                decoded = vae.decode(pred_original).sample
+                image = (decoded / 2 + 0.5).clamp(0, 1)
+
+                # compute reconstruction loss against ground truth
+                gt_image = (batch["pixel_values_vae_gt"].to(dtype=weight_dtype) / 2 + 0.5).clamp(0,1)
+
+                # clip-vision image pre-process
+                clip_vision_process = transforms.Compose( # the clip process input range should be [0, 1]
+                    [transforms.Resize((224, 224)),
+                        transforms.Normalize(
+                            mean=[0.48145466, 0.4578275, 0.40821073],
+                            std=[0.26862954, 0.26130258, 0.27577711]
                         )
+                        ]
+                )
 
+                # clip-vision loss
+                image_features = clip_image_encoder(clip_vision_process(image), output_hidden_states=True).last_hidden_state
+                gt_features = clip_image_encoder(clip_vision_process(gt_image), output_hidden_states=True).last_hidden_state
+
+                loss = F.mse_loss(image_features, gt_features, reduction="mean")
                 accelerator.backward(loss)
                 if accelerator.sync_gradients:
 
                     mapper_params = mapper.parameters()
                     accelerator.clip_grad_norm_(mapper_params, args.max_grad_norm)
-
-                    # vae_decoder_params = vae.decoder.parameters()
-                    # accelerator.clip_grad_norm_(vae_decoder_params, args.max_grad_norm)
 
                 optimizer.step()
                 lr_scheduler.step()
@@ -1371,20 +1289,6 @@ def main(args):
                 clip_image_encoder = clip_image_encoder,
                 mapper = None,
                 test_dataloader = test_dataloader,
-            )
-
-        if args.push_to_hub:
-            save_model_card(
-                repo_id,
-                image_logs=image_logs,
-                base_model=args.pretrained_model_name_or_path,
-                repo_folder=args.output_dir,
-            )
-            upload_folder(
-                repo_id=repo_id,
-                folder_path=args.output_dir,
-                commit_message="End of training",
-                ignore_patterns=["step_*", "epoch_*"],
             )
 
     accelerator.end_training()

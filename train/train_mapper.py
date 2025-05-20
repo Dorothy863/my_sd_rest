@@ -1146,60 +1146,53 @@ def main(args):
                 # Convert VAE outputs into initial noisy latents via iterative sampling instead of single-step noise prediction
                 latents_hq = vae.encode(batch["pixel_values_vae_gt"].to(dtype=weight_dtype)).latent_dist.mode()
                 
-                latents = latents_lq * vae.config.scaling_factor # the input to unet
+                latents = latents_hq * vae.config.scaling_factor # the input to unet
 
                 # Sample noise that we'll add to the latents
                 noise = torch.randn_like(latents)
 
                 bsz = latents.shape[0]
                 # Sample a random timestep for each image
+                # timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (bsz,), device=latents.device)
                 timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (1,), device=latents.device).expand(bsz)
                 timesteps = timesteps.long()
 
-                # iterative denoising and decode
-                # latents_hq = vae.encode(batch["pixel_values_vae_gt"].to(dtype=weight_dtype)).latent_dist.mode() * vae.config.scaling_factor
-                noise_scheduler.set_timesteps(50, device=accelerator.device)
-                timesteps = noise_scheduler.timesteps
-
-                # add_noise
-                begin_timestep = 0 # use 0 or 30
-                time_add = timesteps[begin_timestep].long().expand(bsz)
-                noise_scheduler_result = noise_scheduler.add_noise(latents.float(), noise.float(), time_add)
-                latents = noise_scheduler_result.to(dtype=weight_dtype)
-
-                mid_timestep = random.randint(40, 49)
-                for t in timesteps[begin_timestep: mid_timestep]:
-                    with torch.no_grad():
-                        latent_model_input = latents
-                        latent_model_input = noise_scheduler.scale_model_input(latent_model_input, t)
-                        noise_pred = unet(latent_model_input, t, encoder_hidden_states=encoder_hidden_states).sample
-                        latents = noise_scheduler.step(noise_pred, t, latents).prev_sample
-                t = timesteps[mid_timestep].long().expand(bsz)
-                latent_model_input = noise_scheduler.scale_model_input(latents, t)
-                noise_pred = unet(latent_model_input, t, encoder_hidden_states=encoder_hidden_states).sample
-                pred_original = noise_scheduler.step(noise_pred, t[0], latents).pred_original_sample.to(weight_dtype)
-                pred_original = 1 / vae.config.scaling_factor * pred_original 
-                decoded = vae.decode(pred_original).sample
-                image = (decoded / 2 + 0.5).clamp(0, 1)
-
-                # compute reconstruction loss against ground truth
-                gt_image = (batch["pixel_values_vae_gt"].to(dtype=weight_dtype) / 2 + 0.5).clamp(0,1)
-
-                # clip-vision image pre-process
-                clip_vision_process = transforms.Compose( # the clip process input range should be [0, 1]
-                    [transforms.Resize((224, 224)),
-                        transforms.Normalize(
-                            mean=[0.48145466, 0.4578275, 0.40821073],
-                            std=[0.26862954, 0.26130258, 0.27577711]
-                        )
-                        ]
+                # Add noise to the latents according to the noise magnitude at each timestep
+                # (this is the forward diffusion process)
+                noise_scheduler_result = noise_scheduler.add_noise(latents.float(), noise.float(), timesteps)
+                noisy_latents = noise_scheduler_result["noisy_samples"].to(
+                    dtype=weight_dtype
                 )
 
-                # clip-vision loss
-                image_features = clip_image_encoder(clip_vision_process(image), output_hidden_states=True).last_hidden_state
-                gt_features = clip_image_encoder(clip_vision_process(gt_image), output_hidden_states=True).last_hidden_state
+                # Predict the noise residual
+                model_pred = unet(
+                    noisy_latents,
+                    timesteps,
+                    encoder_hidden_states=encoder_hidden_states,
+                    return_dict=False,
+                )[0]
 
-                loss = F.mse_loss(image_features, gt_features, reduction="mean")
+                # recompute the latents using model_pred
+                noise_scheduler.set_timesteps(num_inference_steps=50, device=accelerator.device)
+
+                # Get the target for loss depending on the prediction type
+                if noise_scheduler.config.prediction_type == "epsilon":
+                    target = noise
+                elif noise_scheduler.config.prediction_type == "v_prediction":
+                    target = noise_scheduler.get_velocity(latents, noise, timesteps)
+                else:
+                    raise ValueError(f"Unknown prediction type {noise_scheduler.config.prediction_type}")
+                
+                loss_mse_noise = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
+
+                scale_loss_mse_noise = 1
+                scale_loss_mse_vae = scale_loss_mse_noise / 48
+                scale_loss_l1_vae = scale_loss_mse_vae * 10
+                scale_loss_lpips = scale_loss_mse_vae # / 10
+                scale_loss_fft = scale_loss_mse_vae / 100
+
+                loss = (scale_loss_mse_noise * loss_mse_noise)
+
                 accelerator.backward(loss)
                 if accelerator.sync_gradients:
 

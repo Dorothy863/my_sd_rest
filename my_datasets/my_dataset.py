@@ -541,7 +541,7 @@ class LQHQDataset(Dataset):
             process += torchvision.transforms.ToTensor(),
             process = torchvision.transforms.Compose(process)
             # 转换为 Tensor
-            torch_image = process(image)
+            torch_image = process(image) # the output is [0,1]
             torch_image_gt = process(image_gt)
 
             # 如果退化类型为 "low-light"，对 LQ 图像做亮度均衡化（直方图均衡化）
