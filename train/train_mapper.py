@@ -247,7 +247,7 @@ def log_validation(
                     num_inference_steps=50,
                     guidance_scale=7.5,
                     generator=generator,
-                    latents=vae_embeding * vae.config.scaling_factor,
+                    # latents=vae_embeding * vae.config.scaling_factor,
                     # vae_embeding=vae_embeding,
                 ).images[0]
 
@@ -838,7 +838,7 @@ def main(args):
 
     # 加载预训练mapper和图像编码器
     mapper = Mapper(input_dim=1280, output_dim=1024, num_words=20).to(accelerator.device)
-    mapper = mapper.prepare_mapper_with_unet(unet)
+    # mapper = mapper.prepare_mapper_with_unet(unet)
 
     if args.mapper_model_path is not None:
         mapper.load_state_dict(torch.load(args.mapper_model_path))
@@ -897,7 +897,6 @@ def main(args):
                     else:
                         raise ValueError("Unknown model type encountered.")  # provide a meaningful error message
                     
-                    
                     logger.info(f"Saved {sub_dir} to {model_save_path}")
 
         def load_model_hook(models, input_dir):
@@ -937,8 +936,6 @@ def main(args):
     # vae.decoder.requires_grad_(False)
     # mapper.requires_grad_(False)
     mapper.train()
-
-    
 
     # Enable TF32 for faster training on Ampere GPUs,
     # cf https://pytorch.org/docs/stable/notes/cuda.html#tensorfloat-32-tf32-on-ampere-devices
@@ -1164,15 +1161,14 @@ def main(args):
                 noise_scheduler.set_timesteps(50, device=accelerator.device)
                 timesteps = noise_scheduler.timesteps
 
-                
-
                 # add_noise
-                time_add = timesteps[30].long().expand(bsz)
+                begin_timestep = 0 # use 0 or 30
+                time_add = timesteps[begin_timestep].long().expand(bsz)
                 noise_scheduler_result = noise_scheduler.add_noise(latents.float(), noise.float(), time_add)
                 latents = noise_scheduler_result.to(dtype=weight_dtype)
 
                 mid_timestep = random.randint(40, 49)
-                for t in timesteps[30: mid_timestep]:
+                for t in timesteps[begin_timestep: mid_timestep]:
                     with torch.no_grad():
                         latent_model_input = latents
                         latent_model_input = noise_scheduler.scale_model_input(latent_model_input, t)
@@ -1188,15 +1184,27 @@ def main(args):
 
                 # compute reconstruction loss against ground truth
                 gt_image = (batch["pixel_values_vae_gt"].to(dtype=weight_dtype) / 2 + 0.5).clamp(0,1)
-                loss = F.mse_loss(image, gt_image, reduction="mean")
+
+                # clip-vision image pre-process
+                clip_vision_process = transforms.Compose( # the clip process input range should be [0, 1]
+                    [transforms.Resize((224, 224)),
+                        transforms.Normalize(
+                            mean=[0.48145466, 0.4578275, 0.40821073],
+                            std=[0.26862954, 0.26130258, 0.27577711]
+                        )
+                        ]
+                )
+
+                # clip-vision loss
+                image_features = clip_image_encoder(clip_vision_process(image), output_hidden_states=True).last_hidden_state
+                gt_features = clip_image_encoder(clip_vision_process(gt_image), output_hidden_states=True).last_hidden_state
+
+                loss = F.mse_loss(image_features, gt_features, reduction="mean")
                 accelerator.backward(loss)
                 if accelerator.sync_gradients:
 
                     mapper_params = mapper.parameters()
                     accelerator.clip_grad_norm_(mapper_params, args.max_grad_norm)
-
-                    # vae_decoder_params = vae.decoder.parameters()
-                    # accelerator.clip_grad_norm_(vae_decoder_params, args.max_grad_norm)
 
                 optimizer.step()
                 lr_scheduler.step()
