@@ -83,31 +83,31 @@ class FineMapper(nn.Module):
 
 class FeatureProjector(nn.Module):
     def __init__(self,
-                 vis_dim=1280,
-                 txt_dim=1024,
-                 num_queries=20,
+                 input_dim=1280,
+                 output_dim=1024,
+                 num_words=20,
                  n_heads=8,
                  dropout=0.1):
         super().__init__()
-        self.d_model = txt_dim
+        self.d_model = output_dim
         
         # 视觉特征预处理
         self.vis_proj = nn.Sequential(
-            nn.LayerNorm(vis_dim),
-            nn.Linear(vis_dim, txt_dim),
+            nn.LayerNorm(input_dim),
+            nn.Linear(input_dim, output_dim),
             nn.GELU(),
             nn.Dropout(dropout)
         )
         
         # 可学习的查询向量
         self.query_embeds = nn.Parameter(
-            torch.randn(1, num_queries, txt_dim)  # 初始化为随机张量
+            torch.randn(1, num_words, output_dim)  # 初始化为随机张量
         )
         
         # Transformer解码器层
         self.decoder = nn.TransformerDecoder(
             decoder_layer=nn.TransformerDecoderLayer(
-                d_model=txt_dim,
+                d_model=output_dim,
                 nhead=n_heads,
                 dropout=dropout,
                 batch_first=True
@@ -116,8 +116,8 @@ class FeatureProjector(nn.Module):
         )
         
         # 输出适配器
-        self.output_norm = nn.LayerNorm(txt_dim)
-        self.output_proj = nn.Linear(txt_dim, txt_dim)
+        self.output_norm = nn.LayerNorm(output_dim)
+        self.output_proj = nn.Linear(output_dim, output_dim)
     def forward(self, visual_features):
         """
         Args:
