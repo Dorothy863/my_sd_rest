@@ -95,7 +95,7 @@ def log_validation(
     if not is_final_validation:
         mapper = accelerator.unwrap_model(mapper)
     else:
-        mapper = Mapper(input_dim=1280, output_dim=1024, num_words=20, gate_type='softmax', adapter_dim=256).to(accelerator.device)
+        mapper = Mapper(input_dim=1280, output_dim=1024, num_words=20).to(accelerator.device)
         # mapper = mapper.prepare_mapper_with_unet(unet)
         mapper.load_state_dict(torch.load(args.mapper_model_path))
 
@@ -837,7 +837,7 @@ def main(args):
     )
 
     # 加载预训练mapper和图像编码器
-    mapper = Mapper(input_dim=1280, output_dim=1024, num_words=20, gate_type='softmax', adapter_dim=256).to(accelerator.device)
+    mapper = Mapper(input_dim=1280, output_dim=1024, num_words=20).to(accelerator.device)
     # mapper = mapper.prepare_mapper_with_unet(unet)
 
     if args.mapper_model_path is not None:

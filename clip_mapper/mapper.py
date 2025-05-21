@@ -69,7 +69,7 @@ class EnhanceMapper(nn.Module):
                  input_dim: int,
                  output_dim: int,
                  num_words: int,
-                 adapter_dim: int = 512,
+                 adapter_dim: int = 256,
                  gate_type: str = 'softmax'  # 'sigmoid' or 'softmax'
                 ):
         super().__init__()
