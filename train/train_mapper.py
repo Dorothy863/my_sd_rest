@@ -56,7 +56,7 @@ from diffusers.utils.hub_utils import load_or_create_model_card, populate_model_
 from diffusers.utils.import_utils import is_xformers_available
 from diffusers.utils.torch_utils import is_compiled_module
 
-from clip_mapper.mapper import Mapper
+from clip_mapper.mapper import FeatureProjector as Mapper
 
 from datetime import datetime
 
