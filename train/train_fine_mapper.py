@@ -56,7 +56,7 @@ from diffusers.utils.hub_utils import load_or_create_model_card, populate_model_
 from diffusers.utils.import_utils import is_xformers_available
 from diffusers.utils.torch_utils import is_compiled_module
 
-from clip_mapper.mapper import Mapper
+from clip_mapper.mapper import Mapper, FineMapper
 
 from datetime import datetime
 
@@ -81,7 +81,7 @@ def image_grid(imgs, rows, cols):
 
 
 def log_validation(
-    vae, text_encoder, tokenizer, unet, args, accelerator, weight_dtype, step, is_final_validation=False, clip_image_encoder=None, mapper=None, test_dataloader=None
+    vae, text_encoder, tokenizer, unet, args, accelerator, weight_dtype, step, is_final_validation=False, clip_image_encoder=None, mapper=None, fine_mapper=None, test_dataloader=None
 ):
     logger.info("Running validation... ")
     
@@ -96,7 +96,7 @@ def log_validation(
         mapper = accelerator.unwrap_model(mapper)
     else:
         mapper = Mapper(input_dim=1280, output_dim=1024, num_words=20).to(accelerator.device)
-        mapper = mapper.prepare_mapper_with_unet(unet)
+        # mapper = mapper.prepare_mapper_with_unet(unet)
         mapper.load_state_dict(torch.load(args.mapper_model_path))
 
     pipeline = StableDiffusionPipeline.from_pretrained(
@@ -122,7 +122,7 @@ def log_validation(
     else:
         generator = torch.Generator(device=accelerator.device).manual_seed(args.seed)
 
-    base_text = "a photo of {}"
+    base_text = "{}"
     placeholder = "S"
     validation_text = base_text.format(placeholder)
     
@@ -154,27 +154,6 @@ def log_validation(
             )
         return image_transforms(image).to(accelerator.device)
 
-    """if len(args.validation_image) == 1:
-        validation_images = args.validation_image
-        validation_prompts = validation_text
-    else:
-        # validation_images = args.validation_image
-        validation_images = args.validation_image
-        validation_prompts = [validation_text] * len(args.validation_image)
-    if len(args.validation_image) == len(args.validation_prompt):
-        validation_images = args.validation_image
-        validation_prompts = args.validation_prompt
-    elif len(args.validation_image) == 1:
-        validation_images = args.validation_image * len(args.validation_prompt)
-        validation_prompts = args.validation_prompt
-    elif len(args.validation_prompt) == 1:
-        validation_images = args.validation_image
-        validation_prompts = args.validation_prompt * len(args.validation_image)
-    else:
-        raise ValueError(
-            "number of `args.validation_image` and `args.validation_prompt` should be checked in `parse_args`"
-        )"""
-
     image_logs = []
     inference_ctx = contextlib.nullcontext() if is_final_validation else torch.autocast("cuda")
 
@@ -199,16 +178,16 @@ def log_validation(
         )(validation_image)
 
         # 处理输入图像 (新增部分)
-        processed_image_clip = process_validation_image_clip(validation_image)
+        processed_image_clip = process_validation_image_clip((batch["pixel_values_vae_gt"]+1)*0.5)
         processed_image = process_validation_image(validation_image)
         
         # 提取图像特征和生成嵌入 (新增部分)
         with torch.no_grad():
-            # 提取图像特征
+# 提取图像特征
             image_features = [clip_image_encoder(processed_image_clip, output_hidden_states=True).last_hidden_state]
             image_embeddings = [emb.detach() for emb in image_features]
-            # 通过mapper生成嵌入
-            inj_embedding = mapper(image_embeddings)
+            base_emb = mapper(image_embeddings)
+            inj_embedding = fine_mapper(base_emb)
         
         # 构建注入输入 (新增部分)
         input_ids = tokenizer(
@@ -234,7 +213,7 @@ def log_validation(
         images = []
 
         with inference_ctx:
-            # vae_latents = vae.encode(processed_image).latent_dist.mode() * vae.config.scaling_factor
+            # vae_latents = vae.encode(processed_image).latent_dist.mode() * vae.config.scaling_factor 
             vae_embeding = vae.encode(processed_image).latent_dist.mode() 
             vae_embeding_gt = vae.encode(validation_image_gt).latent_dist.mode() 
             
@@ -247,13 +226,13 @@ def log_validation(
             images.append(validation_image_gt)
             # validation_image_gt.save(os.path.join(now_save_path, 'gt', f"batch_{idx}.png"))
 
-            vae_result = vae.decode(vae_embeding, cross_emb=vae_embeding).sample.clamp(-1, 1)
+            vae_result = vae.decode(vae_embeding).sample.clamp(-1, 1)
             image_vae = (vae_result + 1) / 2
             image_vae = transforms.functional.to_pil_image(image_vae[0])
             images.append(image_vae)
             # image_vae.save(os.path.join(now_save_path, 'vae', f"batch_{idx}.png"))
 
-            vae_result_gt = vae.decode(vae_embeding_gt, cross_emb=vae_embeding).sample.clamp(-1, 1)
+            vae_result_gt = vae.decode(vae_embeding_gt).sample.clamp(-1, 1)
             image_vae_gt = (vae_result_gt + 1) / 2
             image_vae_gt = transforms.functional.to_pil_image(image_vae_gt[0])
             images.append(image_vae_gt)
@@ -263,13 +242,13 @@ def log_validation(
                 # 使用生成的嵌入 (修改部分)
                 image = pipeline(
                     # validation_prompt=None,  # 使用嵌入时不需文本提示
-                    image=processed_image,
+                    # image=processed_image,
                     prompt_embeds=prompt_embeds,
                     num_inference_steps=50,
                     guidance_scale=7.5,
                     generator=generator,
                     # latents=vae_embeding * vae.config.scaling_factor,
-                    vae_embeding=vae_embeding,
+                    # vae_embeding=vae_embeding,
                 ).images[0]
 
                 images.append(image)
@@ -325,48 +304,6 @@ def import_model_class_from_model_name_or_path(pretrained_model_name_or_path: st
         return RobertaSeriesModelWithTransformation
     else:
         raise ValueError(f"{model_class} is not supported.")
-
-
-def save_model_card(repo_id: str, image_logs=None, base_model=str, repo_folder=None):
-    img_str = ""
-    if image_logs is not None:
-        img_str = "You can find some example images below.\n\n"
-        for i, log in enumerate(image_logs):
-            images = log["images"]
-            validation_prompt = log["validation_prompt"]
-            validation_image = log["validation_image"]
-            validation_image.save(os.path.join(repo_folder, "image_control.png"))
-            img_str += f"prompt: {validation_prompt}\n"
-            images = [validation_image] + images
-            image_grid(images, 1, len(images)).save(os.path.join(repo_folder, f"images_{i}.png"))
-            img_str += f"![images_{i})](./images_{i}.png)\n"
-
-    model_description = f"""
-# controlnet-{repo_id}
-
-These are controlnet weights trained on {base_model} with new type of conditioning.
-{img_str}
-"""
-    model_card = load_or_create_model_card(
-        repo_id_or_path=repo_id,
-        from_training=True,
-        license="creativeml-openrail-m",
-        base_model=base_model,
-        model_description=model_description,
-        inference=True,
-    )
-
-    tags = [
-        "stable-diffusion",
-        "stable-diffusion-diffusers",
-        "text-to-image",
-        "diffusers",
-        "controlnet",
-        "diffusers-training",
-    ]
-    model_card = populate_model_card(model_card, tags=tags)
-
-    model_card.save(os.path.join(repo_folder, "README.md"))
 
 
 def parse_args(input_args=None):
@@ -707,6 +644,12 @@ def parse_args(input_args=None):
         default=None,
         help="Path to pretrained CLIP-I2T mapper model",
     )
+    parser.add_argument(
+        "--fine_mapper_model_path",
+        type=str,
+        default=None,
+        help="Path to pretrained FineMapper model",
+    )
 
     if input_args is not None:
         args = parser.parse_args(input_args)
@@ -859,11 +802,14 @@ def main(args):
 
     # 加载预训练mapper和图像编码器
     mapper = Mapper(input_dim=1280, output_dim=1024, num_words=20).to(accelerator.device)
-    mapper = mapper.prepare_mapper_with_unet(unet)
+    # mapper = mapper.prepare_mapper_with_unet(unet)
+
+    fine_mapper = FineMapper(input_dim=1024, output_dim=1024, num_words=20).to(accelerator.device)
 
     if args.mapper_model_path is not None:
         mapper.load_state_dict(torch.load(args.mapper_model_path))
-    
+    if args.fine_mapper_model_path is not None:
+        fine_mapper.load_state_dict(torch.load(args.fine_mapper_model_path))
 
     clip_image_encoder = CLIPVisionModel.from_pretrained(
         args.clip_path, 
@@ -918,12 +864,9 @@ def main(args):
                     else:
                         raise ValueError("Unknown model type encountered.")  # provide a meaningful error message
                     
-                    
                     logger.info(f"Saved {sub_dir} to {model_save_path}")
 
         def load_model_hook(models, input_dir):
-            # 先加载ControlNet
-
             # 再加载Mapper
             mapper_path = os.path.join(input_dir, "mapper")
             if os.path.exists(mapper_path) and len(models) > 1:
@@ -931,54 +874,34 @@ def main(args):
                 models[1].load_state_dict(mapper_state)
                 logger.info(f"Loaded Mapper from {mapper_path}")
 
+
+            fine_mapper_path = os.path.join(input_dir, "fine_mapper")
+            if os.path.exists(fine_mapper_path) and len(models) > 2:
+                fine_mapper_state = torch.load(os.path.join(fine_mapper_path, "fine_mapper.pt"))
+                models[2].load_state_dict(fine_mapper_state)
+                logger.info(f"Loaded FineMapper from {fine_mapper_path}")
+
         accelerator.register_save_state_pre_hook(save_model_hook)
         accelerator.register_load_state_pre_hook(load_model_hook)
 
-    # 自定义保存函数（兼容最新版accelerate）
+    # 自定义保存函数（兼容最新版accelerate），保存 FineMapper
     def custom_save_function(output_dir):
-        # 创建模型保存目录
-        mapper_dir = os.path.join(output_dir, "mapper")
-        # vae_dir = os.path.join(output_dir, "vae")
-        os.makedirs(mapper_dir, exist_ok=True)
-        # os.makedirs(vae_dir, exist_ok=True)
-        
-        # 保存Mapper（自定义格式）
-        mapper_state = accelerator.get_state_dict(mapper)
-        torch.save(mapper_state, os.path.join(mapper_dir, "mapper.pt"))
+        # 创建 fine_mapper 保存目录
+        fine_mapper_dir = os.path.join(output_dir, "fine_mapper")
+        os.makedirs(fine_mapper_dir, exist_ok=True)
 
-        # 保存VAE（使用diffusers格式）
-        # unwrap_model(vae).save_pretrained(vae_dir)
+        # 保存 FineMapper（自定义格式）
+        fine_state = accelerator.get_state_dict(fine_mapper)
+        torch.save(fine_state, os.path.join(fine_mapper_dir, "fine_mapper.pt"))
 
 
     vae.requires_grad_(False)
     unet.requires_grad_(False)
     text_encoder.requires_grad_(False)
     clip_image_encoder.requires_grad_(False)
-    
-    vae.decoder.requires_grad_(False)
-    vae.decoder.eval()
-    mapper.requires_grad_(True)
-    # mapper.eval()
-    mapper.train()
-
-    if args.enable_xformers_memory_efficient_attention:
-        if is_xformers_available():
-            import xformers
-
-            xformers_version = version.parse(xformers.__version__)
-            if xformers_version == version.parse("0.0.16"):
-                logger.warning(
-                    "xFormers 0.0.16 cannot be used for training in some GPUs. If you observe problems during training, please update xFormers to at least 0.0.17. See https://huggingface.co/docs/diffusers/main/en/optimization/xformers for more details."
-                )
-            unet.enable_xformers_memory_efficient_attention()
-        else:
-            raise ValueError("xformers is not available. Make sure it is installed correctly")
-
-    # Check that all trainable models are in full precision
-    low_precision_error_string = (
-        " Please make sure to always have all model weights in full float32 precision when starting training - even if"
-        " doing mixed precision training, copy of the weights should still be float32."
-    )
+    # freeze base mapper, train fine_mapper
+    mapper.requires_grad_(False)
+    fine_mapper.train()
 
     # Enable TF32 for faster training on Ampere GPUs,
     # cf https://pytorch.org/docs/stable/notes/cuda.html#tensorfloat-32-tf32-on-ampere-devices
@@ -1004,7 +927,7 @@ def main(args):
         optimizer_class = torch.optim.AdamW
 
     # Optimizer creation
-    params_to_optimize = list(mapper.parameters()) # + list(vae.decoder.parameters())
+    params_to_optimize = list(fine_mapper.parameters())
     optimizer = optimizer_class(
         params = params_to_optimize,
         lr=args.learning_rate,
@@ -1013,32 +936,21 @@ def main(args):
         eps=args.adam_epsilon,
     )
 
+    from my_datasets.my_dataset import LQHQDataset
 
-
-    """train_dataset = make_train_dataset(args, tokenizer, accelerator)
-    train_dataloader = torch.utils.data.DataLoader(
-        train_dataset,
-        shuffle=True,
-        collate_fn=collate_fn,
-        batch_size=args.train_batch_size,
-        num_workers=args.dataloader_num_workers,
-    )"""
-
-    from my_datasets.my_dataset import UnpairedLQHQDataset
-
-    train_dataset = UnpairedLQHQDataset(
-        csv_path=args.train_data_dir,  # 替换为实际路径
+    train_dataset = LQHQDataset(
+        dataset_path=args.train_data_dir,  # 替换为实际路径
         tokenizer=tokenizer,
         size=args.resolution,
         placeholder_token="S"
     )
 
-    test_dataset = UnpairedLQHQDataset(
-        csv_path=args.test_data_dir,  # 替换为实际路径
+    test_dataset = LQHQDataset(
+        dataset_path=args.test_data_dir,  # 替换为实际路径
         tokenizer=tokenizer,
         size=args.resolution,
         placeholder_token="S",
-        max_sample=20,
+        max_sample=2,
     )
 
     train_dataloader = torch.utils.data.DataLoader(
@@ -1072,8 +984,8 @@ def main(args):
     )
 
     # Prepare everything with our `a`ccelerator`.
-    mapper, optimizer, train_dataloader, test_dataloader, lr_scheduler = accelerator.prepare(
-        mapper, optimizer, train_dataloader, test_dataloader, lr_scheduler
+    fine_mapper, optimizer, train_dataloader, test_dataloader, lr_scheduler = accelerator.prepare(
+        fine_mapper, optimizer, train_dataloader, test_dataloader, lr_scheduler
     )
 
     # For mixed precision training we cast the text_encoder and vae weights to half-precision
@@ -1090,6 +1002,8 @@ def main(args):
     text_encoder.to(accelerator.device, dtype=weight_dtype)
     clip_image_encoder.to(accelerator.device, dtype=weight_dtype)
     mapper.to(accelerator.device, dtype=weight_dtype)
+    # the train model shouldnot be fp16
+    # fine_mapper.to(accelerator.device, dtype=weight_dtype)
 
     # We need to recalculate our total training steps as the size of the training dataloader may have changed.
     num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
@@ -1125,8 +1039,8 @@ def main(args):
     first_epoch = 0
 
     # Potentially load in the weights and states from a previous save
-    if args.mapper_model_path:
-        path = args.mapper_model_path
+    if args.fine_mapper_model_path:
+        path = args.fine_mapper_model_path
 
         if not os.path.exists(path):
             raise ValueError(f"Model weights not found at {path}, should not use controlnet_model_name_or_path or provide a valid path.")
@@ -1158,9 +1072,8 @@ def main(args):
     for epoch in range(first_epoch, args.num_train_epochs):
         for step, batch in enumerate(train_dataloader):
             with accelerator.accumulate([
-                mapper, 
-                # vae.decoder
-                ]):
+                fine_mapper,
+            ]):
 
                 if step == 0 and global_step==initial_global_step :  # test the first step
                     image_logs = log_validation(
@@ -1174,49 +1087,19 @@ def main(args):
                         global_step,
                         clip_image_encoder = clip_image_encoder,
                         mapper = mapper,
+                        fine_mapper = fine_mapper,
                         test_dataloader = test_dataloader,
                     )
 
-                # Convert images to latent space
-                latents_lq = vae.encode(batch["pixel_values"].to(dtype=weight_dtype)).latent_dist.mode() # * vae.config.scaling_factor
-                latents_hq = vae.encode(batch["pixel_values_vae_gt"].to(dtype=weight_dtype)).latent_dist.mode()
-
-                latents = latents_hq * vae.config.scaling_factor # the input to unet
-
-                # Sample noise that we'll add to the latents
-                noise = torch.randn_like(latents)
-                bsz = latents.shape[0]
-                # Sample a random timestep for each image
-                # timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (bsz,), device=latents.device)
-                timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (1,), device=latents.device).expand(bsz)
-                timesteps = timesteps.long()
-
-                # Add noise to the latents according to the noise magnitude at each timestep
-                # (this is the forward diffusion process)
-                noise_scheduler_result = noise_scheduler.add_noise(latents.float(), noise.float(), timesteps)
-                noisy_latents = noise_scheduler_result["noisy_samples"].to(
-                    dtype=weight_dtype
-                )
-
-                # clip-vision image pre-process
-                clip_vision_process = transforms.Compose( # the clip process input range should be [0, 1]
-                    [transforms.Resize((224, 224)),
-                        transforms.Normalize(
-                            mean=[0.48145466, 0.4578275, 0.40821073],
-                            std=[0.26862954, 0.26130258, 0.27577711]
-                        )
-                        ]
-                )
-
-                # 修改原始的文本编码部分
                 # with torch.no_grad():
                 # 提取图像特征
-                image_features = [clip_image_encoder(clip_vision_process((batch["pixel_values"]+1)/2),output_hidden_states=True).last_hidden_state]
+                image_features = [clip_image_encoder(batch['pixel_values_clip'],output_hidden_states=True).last_hidden_state]
                 image_embeddings = [emb.detach() for emb in image_features]
-                # 通过mapper生成嵌入
-                inj_embedding = mapper(image_embeddings)
+                # 通过mapper生成基础嵌入并通过fine_mapper精细调整
+                base_emb = mapper(image_embeddings)
+                inj_embedding = fine_mapper(base_emb)
                 
-                words = "a photo of S".strip().split(' ')
+                words = "S".strip().split(' ')
                 placeholder_index = words.index('S') + 1  # +1 因为CLIP添加了开始token
 
                 # 构造注入输入
@@ -1229,10 +1112,28 @@ def main(args):
                 # 替换原来的文本编码器调用
                 encoder_hidden_states = text_encoder(text_input, return_dict=False)[0]
 
-                """
-                # Get the text embedding for conditioning
-                encoder_hidden_states = text_encoder(batch["input_ids"], return_dict=False)[0]
-                """
+                # Convert images to latent space
+                latents_lq = vae.encode(batch["pixel_values"].to(dtype=weight_dtype)).latent_dist.mode() # * vae.config.scaling_factor
+                # Convert VAE outputs into initial noisy latents via iterative sampling instead of single-step noise prediction
+                latents_hq = vae.encode(batch["pixel_values_vae_gt"].to(dtype=weight_dtype)).latent_dist.mode()
+                
+                latents = latents_hq * vae.config.scaling_factor # the input to unet
+
+                # Sample noise that we'll add to the latents
+                noise = torch.randn_like(latents)
+
+                bsz = latents.shape[0]
+                # Sample a random timestep for each image
+                # timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (bsz,), device=latents.device)
+                timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (1,), device=latents.device).expand(bsz)
+                timesteps = timesteps.long()
+
+                # Add noise to the latents according to the noise magnitude at each timestep
+                # (this is the forward diffusion process)
+                noise_scheduler_result = noise_scheduler.add_noise(latents.float(), noise.float(), timesteps)
+                noisy_latents = noise_scheduler_result.to(
+                    dtype=weight_dtype
+                )
 
                 # Predict the noise residual
                 model_pred = unet(
@@ -1245,14 +1146,6 @@ def main(args):
                 # recompute the latents using model_pred
                 noise_scheduler.set_timesteps(num_inference_steps=50, device=accelerator.device)
 
-                # result_latents = noise_scheduler.step(model_pred, timesteps[0], latents, return_dict=True)
-                # result_latents = result_latents["pred_original_sample"]
-                # result_decoder = vae.decode(result_latents * vae.config.scaling_factor, cross_emb=latents_lq).sample
-
-                # with torch.no_grad():
-                #     result_decoder_lq = vae.decode(latents_lq, cross_emb=latents_lq).sample
-                #     result_decoder_hq = vae.decode(latents_hq, cross_emb=latents_hq).sample
-
                 # Get the target for loss depending on the prediction type
                 if noise_scheduler.config.prediction_type == "epsilon":
                     target = noise
@@ -1262,32 +1155,15 @@ def main(args):
                     raise ValueError(f"Unknown prediction type {noise_scheduler.config.prediction_type}")
                 
                 loss_mse_noise = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
-                # loss_mse_vae = F.mse_loss(result_decoder, batch["pixel_values_vae_gt"].to(dtype=weight_dtype), reduction="mean")
-                # loss_l1_vae = F.l1_loss(result_decoder, batch["pixel_values_vae_gt"].to(dtype=weight_dtype), reduction="mean")
-                # loss_lpips = lpips_loss_fn(result_decoder, batch["pixel_values_vae_gt"].to(dtype=weight_dtype)).mean()
-                # loss_fft = fft_loss(result_decoder, batch["pixel_values_vae_gt"].to(dtype=weight_dtype))
 
                 scale_loss_mse_noise = 1
-                scale_loss_mse_vae = scale_loss_mse_noise / 48
-                scale_loss_l1_vae = scale_loss_mse_vae * 10
-                scale_loss_lpips = scale_loss_mse_vae # / 10
-                scale_loss_fft = scale_loss_mse_vae / 100
 
-                loss = (scale_loss_mse_noise * loss_mse_noise 
-                        # + scale_loss_mse_vae * loss_mse_vae
-                        # + scale_loss_lpips * loss_lpips 
-                        # + scale_loss_l1_vae * loss_l1_vae 
-                        # + scale_loss_fft * loss_fft
-                        )
+                loss = (scale_loss_mse_noise * loss_mse_noise)
 
                 accelerator.backward(loss)
                 if accelerator.sync_gradients:
-
-                    mapper_params = mapper.parameters()
-                    accelerator.clip_grad_norm_(mapper_params, args.max_grad_norm)
-
-                    # vae_decoder_params = vae.decoder.parameters()
-                    # accelerator.clip_grad_norm_(vae_decoder_params, args.max_grad_norm)
+                    fine_params = fine_mapper.parameters()
+                    accelerator.clip_grad_norm_(fine_params, args.max_grad_norm)
 
                 optimizer.step()
                 lr_scheduler.step()
@@ -1303,7 +1179,7 @@ def main(args):
                         # _before_ saving state, check if this save would set us over the `checkpoints_total_limit`
                         if args.checkpoints_total_limit is not None:
                             checkpoints = os.listdir(args.output_dir)
-                            checkpoints = [d for d in checkpoints if d.startswith("mapper_checkpoint")]
+                            checkpoints = [d for d in checkpoints if d.startswith("fine_mapper_checkpoint")]
                             checkpoints = sorted(checkpoints, key=lambda x: int(x.split("-")[1]))
 
                             # before we save the new checkpoint, we need to have at _most_ `checkpoints_total_limit - 1` checkpoints
@@ -1320,7 +1196,7 @@ def main(args):
                                     removing_checkpoint = os.path.join(args.output_dir, removing_checkpoint)
                                     shutil.rmtree(removing_checkpoint)
 
-                        save_path = os.path.join(args.output_dir, f"mapper_checkpoint-{global_step}")
+                        save_path = os.path.join(args.output_dir, f"fine_mapper_checkpoint-{global_step}")
                         custom_save_function(save_path)
                         # accelerator.save_state(save_path)
                         logger.info(f"Saved state to {save_path}")
@@ -1337,6 +1213,7 @@ def main(args):
                             global_step,
                             clip_image_encoder = clip_image_encoder,
                             mapper = mapper,
+                            fine_mapper = fine_mapper,
                             test_dataloader = test_dataloader,
                         )
 
@@ -1350,11 +1227,10 @@ def main(args):
     # Create the pipeline using the trained modules and save it.
     accelerator.wait_for_everyone()
     if accelerator.is_main_process:
-        controlnet = unwrap_model(controlnet)
-        controlnet.save_pretrained(args.output_dir)
-
-        mapper_state = accelerator.get_state_dict(mapper)
-        torch.save(mapper_state, os.path.join(args.output_dir, "pytorch_model.bin"))
+        # Save the fine_mapper model state
+        fine_state = accelerator.get_state_dict(fine_mapper)
+        os.makedirs(args.output_dir, exist_ok=True)
+        torch.save(fine_state, os.path.join(args.output_dir, "fine_mapper_model.bin"))
 
         # Run a final round of validation.
         image_logs = None
@@ -1371,21 +1247,8 @@ def main(args):
                 is_final_validation=True,
                 clip_image_encoder = clip_image_encoder,
                 mapper = None,
+                fine_mapper = fine_mapper,
                 test_dataloader = test_dataloader,
-            )
-
-        if args.push_to_hub:
-            save_model_card(
-                repo_id,
-                image_logs=image_logs,
-                base_model=args.pretrained_model_name_or_path,
-                repo_folder=args.output_dir,
-            )
-            upload_folder(
-                repo_id=repo_id,
-                folder_path=args.output_dir,
-                commit_message="End of training",
-                ignore_patterns=["step_*", "epoch_*"],
             )
 
     accelerator.end_training()

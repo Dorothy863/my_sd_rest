@@ -76,3 +76,8 @@ def show(image: Union[Image.Image, torch.Tensor, np.ndarray],
     plt.savefig(filename, bbox_inches="tight", pad_inches=0, transparent=True, dpi=dpi)
     plt.close(fig)
     print(f"🎉 图像已保存到: {filename}")  # 输出提示
+
+def print_model_dtypes(model):
+    for name, module in model.named_modules():
+        for param_name, param in module.named_parameters(recurse=False):
+            print(f"Module: {name:<40} | Parameter: {param_name:<15} | dtype: {param.dtype}")

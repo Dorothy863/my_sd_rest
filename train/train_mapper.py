@@ -95,8 +95,8 @@ def log_validation(
     if not is_final_validation:
         mapper = accelerator.unwrap_model(mapper)
     else:
-        mapper = Mapper(input_dim=1280, output_dim=1024, num_words=20).to(accelerator.device)
-        mapper = mapper.prepare_mapper_with_unet(unet)
+        mapper = Mapper(input_dim=1280, output_dim=1024, num_words=20, gate_type='softmax', adapter_dim=256).to(accelerator.device)
+        # mapper = mapper.prepare_mapper_with_unet(unet)
         mapper.load_state_dict(torch.load(args.mapper_model_path))
 
     pipeline = StableDiffusionPipeline.from_pretrained(
@@ -178,7 +178,7 @@ def log_validation(
         )(validation_image)
 
         # 处理输入图像 (新增部分)
-        processed_image_clip = process_validation_image_clip(validation_image)
+        processed_image_clip = process_validation_image_clip((batch["pixel_values_vae_gt"]+1)*0.5)
         processed_image = process_validation_image(validation_image)
         
         # 提取图像特征和生成嵌入 (新增部分)
@@ -837,7 +837,7 @@ def main(args):
     )
 
     # 加载预训练mapper和图像编码器
-    mapper = Mapper(input_dim=1280, output_dim=1024, num_words=20).to(accelerator.device)
+    mapper = Mapper(input_dim=1280, output_dim=1024, num_words=20, gate_type='softmax', adapter_dim=256).to(accelerator.device)
     # mapper = mapper.prepare_mapper_with_unet(unet)
 
     if args.mapper_model_path is not None:
@@ -984,7 +984,7 @@ def main(args):
         tokenizer=tokenizer,
         size=args.resolution,
         placeholder_token="S",
-        max_sample=5,
+        max_sample=2,
     )
 
     train_dataloader = torch.utils.data.DataLoader(
@@ -1160,7 +1160,7 @@ def main(args):
                 # Add noise to the latents according to the noise magnitude at each timestep
                 # (this is the forward diffusion process)
                 noise_scheduler_result = noise_scheduler.add_noise(latents.float(), noise.float(), timesteps)
-                noisy_latents = noise_scheduler_result["noisy_samples"].to(
+                noisy_latents = noise_scheduler_result.to(
                     dtype=weight_dtype
                 )
 
@@ -1186,10 +1186,6 @@ def main(args):
                 loss_mse_noise = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
 
                 scale_loss_mse_noise = 1
-                scale_loss_mse_vae = scale_loss_mse_noise / 48
-                scale_loss_l1_vae = scale_loss_mse_vae * 10
-                scale_loss_lpips = scale_loss_mse_vae # / 10
-                scale_loss_fft = scale_loss_mse_vae / 100
 
                 loss = (scale_loss_mse_noise * loss_mse_noise)
 
