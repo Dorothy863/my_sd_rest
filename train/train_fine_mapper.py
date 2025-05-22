@@ -178,7 +178,8 @@ def log_validation(
         )(validation_image)
 
         # 处理输入图像 (新增部分)
-        processed_image_clip = process_validation_image_clip((batch["pixel_values_vae_gt"]+1)*0.5)
+        processed_image_clip = process_validation_image_clip(validation_image)
+        # processed_image_clip = process_validation_image_clip((batch["pixel_values_vae_gt"]+1)*0.5)
         processed_image = process_validation_image(validation_image)
         
         # 提取图像特征和生成嵌入 (新增部分)

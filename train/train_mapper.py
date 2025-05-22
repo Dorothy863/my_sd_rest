@@ -22,6 +22,7 @@ import os
 import random
 import shutil
 from pathlib import Path
+import re
 
 import accelerate
 import numpy as np
@@ -178,13 +179,14 @@ def log_validation(
         )(validation_image)
 
         # 处理输入图像 (新增部分)
-        processed_image_clip = process_validation_image_clip((batch["pixel_values_vae_gt"]+1)*0.5)
+        processed_image_clip = process_validation_image_clip(validation_image)
+        # processed_image_clip = process_validation_image_clip((batch["pixel_values_vae_gt"] + 1) / 2)
         processed_image = process_validation_image(validation_image)
         
         # 提取图像特征和生成嵌入 (新增部分)
         with torch.no_grad():
             # 提取图像特征
-            image_features = [clip_image_encoder(processed_image, output_hidden_states=True).last_hidden_state]
+            image_features = [clip_image_encoder(processed_image_clip, output_hidden_states=True).last_hidden_state]
             image_embeddings = [emb.detach() for emb in image_features]
             # 通过mapper生成嵌入
             inj_embedding = mapper(image_embeddings)
@@ -984,7 +986,7 @@ def main(args):
         tokenizer=tokenizer,
         size=args.resolution,
         placeholder_token="S",
-        max_sample=2,
+        max_sample=200,
     )
 
     train_dataloader = torch.utils.data.DataLoader(
@@ -1072,15 +1074,16 @@ def main(args):
     # Potentially load in the weights and states from a previous save
     if args.mapper_model_path:
         path = args.mapper_model_path
-
         if not os.path.exists(path):
             raise ValueError(f"Model weights not found at {path}, should not use controlnet_model_name_or_path or provide a valid path.")
         else:
-            global_step = int(str(path.split("-")[1]).split('/')[0])
-
+            # 使用正则表达式匹配路径中的checkpoint-数字格式
+            match = re.search(r'checkpoint-(\d+)', path)
+            if not match:
+                raise ValueError(f"Global step not found in checkpoint path: {path}")
+            global_step = int(match.group(1))
             initial_global_step = global_step
             first_epoch = global_step // num_update_steps_per_epoch
-            
     else:
         initial_global_step = 0
 
@@ -1124,6 +1127,7 @@ def main(args):
                 # with torch.no_grad():
                 # 提取图像特征
                 image_features = [clip_image_encoder(batch['pixel_values_clip'],output_hidden_states=True).last_hidden_state]
+
                 image_embeddings = [emb.detach() for emb in image_features]
                 # 通过mapper生成嵌入
                 inj_embedding = mapper(image_embeddings)
@@ -1146,7 +1150,7 @@ def main(args):
                 # Convert VAE outputs into initial noisy latents via iterative sampling instead of single-step noise prediction
                 latents_hq = vae.encode(batch["pixel_values_vae_gt"].to(dtype=weight_dtype)).latent_dist.mode()
                 
-                latents = latents_lq * vae.config.scaling_factor # the input to unet
+                latents = latents_hq * vae.config.scaling_factor # the input to unet
 
                 # Sample noise that we'll add to the latents
                 noise = torch.randn_like(latents)
