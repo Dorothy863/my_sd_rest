@@ -89,6 +89,8 @@ def extract_degradation_type(path):
         train_index = parts.index('train') 
     elif 'val' in parts:
         train_index = parts.index('val')  # 找到train的位置
+    elif 'new_val' in parts:
+        train_index = parts.index('new_val')
     else:
         raise ValueError(f"Invalid path: {path}, must have 'train' or 'val' in path")
     return parts[train_index + 1]       # train下一级目录是退化类型

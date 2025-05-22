@@ -56,7 +56,7 @@ from diffusers.utils.hub_utils import load_or_create_model_card, populate_model_
 from diffusers.utils.import_utils import is_xformers_available
 from diffusers.utils.torch_utils import is_compiled_module
 
-from clip_mapper.mapper import FeatureProjector as Mapper
+from clip_mapper.mapper import Mapper as Mapper
 
 from datetime import datetime
 
@@ -184,7 +184,7 @@ def log_validation(
         # 提取图像特征和生成嵌入 (新增部分)
         with torch.no_grad():
             # 提取图像特征
-            image_features = [clip_image_encoder(processed_image_clip, output_hidden_states=True).last_hidden_state]
+            image_features = [clip_image_encoder(processed_image, output_hidden_states=True).last_hidden_state]
             image_embeddings = [emb.detach() for emb in image_features]
             # 通过mapper生成嵌入
             inj_embedding = mapper(image_embeddings)
@@ -1146,7 +1146,7 @@ def main(args):
                 # Convert VAE outputs into initial noisy latents via iterative sampling instead of single-step noise prediction
                 latents_hq = vae.encode(batch["pixel_values_vae_gt"].to(dtype=weight_dtype)).latent_dist.mode()
                 
-                latents = latents_hq * vae.config.scaling_factor # the input to unet
+                latents = latents_lq * vae.config.scaling_factor # the input to unet
 
                 # Sample noise that we'll add to the latents
                 noise = torch.randn_like(latents)
