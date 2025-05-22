@@ -23,6 +23,7 @@ import random
 import shutil
 from pathlib import Path
 import re
+from datetime import datetime
 
 import accelerate
 import numpy as np
@@ -39,16 +40,18 @@ from packaging import version
 from PIL import Image
 from torchvision import transforms
 from tqdm.auto import tqdm
-from transformers import AutoTokenizer, PretrainedConfig, CLIPVisionModel
+from transformers import AutoTokenizer, PretrainedConfig
+from transformers import CLIPVisionModel
+from my_modules.mapper import Mapper
 
 import diffusers
 from diffusers import (
     AutoencoderKL,
+    ControlNetModel,
     DDPMScheduler,
-    StableDiffusionPipeline,
+    StableDiffusionControlNetPipeline,
     UNet2DConditionModel,
     UniPCMultistepScheduler,
-    PNDMScheduler,
     DDIMScheduler,
 )
 from diffusers.optimization import get_scheduler
@@ -56,16 +59,44 @@ from diffusers.utils import check_min_version, is_wandb_available
 from diffusers.utils.hub_utils import load_or_create_model_card, populate_model_card
 from diffusers.utils.import_utils import is_xformers_available
 from diffusers.utils.torch_utils import is_compiled_module
+from train_controlnet_base import import_model_class_from_model_name_or_path, make_train_dataset
 
-from my_modules.mapper import Mapper as Mapper
+def collate_fn(examples):
+    pixel_values = torch.stack([example["pixel_values"] for example in examples])
+    pixel_values = pixel_values.to(memory_format=torch.contiguous_format).float()
 
-from datetime import datetime
+    conditioning_pixel_values = torch.stack([example["conditioning_pixel_values"] for example in examples])
+    conditioning_pixel_values = conditioning_pixel_values.to(memory_format=torch.contiguous_format).float()
+
+    pixel_values_clip = torch.stack([example["pixel_values_clip"] for example in examples])
+    pixel_values_clip = pixel_values_clip.to(memory_format=torch.contiguous_format).float()
+
+    pixel_values_vae_gt = torch.stack([example["pixel_values_vae_gt"] for example in examples])
+    pixel_values_vae_gt = pixel_values_vae_gt.to(memory_format=torch.contiguous_format).float()
+
+    pixel_values_normal = torch.stack([example["pixel_values_normal"] for example in examples])
+    pixel_values_normal = pixel_values_normal.to(memory_format=torch.contiguous_format).float()
+
+    input_ids = torch.stack([example["input_ids"] for example in examples])
+
+    degration_type = [example["degration_type"] for example in examples]
+
+    return {
+        "pixel_values": pixel_values,
+        "pixel_values_clip": pixel_values_clip,
+        "conditioning_pixel_values": conditioning_pixel_values,
+        "pixel_values_vae_gt": pixel_values_vae_gt,
+        "pixel_values_normal": pixel_values_normal,
+        "input_ids": input_ids,
+        "degration_type": degration_type,
+    }
+
 
 if is_wandb_available():
     import wandb
 
 # Will error if the minimal version of diffusers is not installed. Remove at your own risks.
-# check_min_version("0.33.0.dev0")
+check_min_version("0.34.0.dev0")
 
 logger = get_logger(__name__)
 
@@ -82,7 +113,7 @@ def image_grid(imgs, rows, cols):
 
 
 def log_validation(
-    vae, text_encoder, tokenizer, unet, args, accelerator, weight_dtype, step, is_final_validation=False, clip_image_encoder=None, mapper=None, test_dataloader=None
+    vae, text_encoder, tokenizer, unet, controlnet, args, accelerator, weight_dtype, step, is_final_validation=False, clip_image_encoder=None, mapper=None, test_dataloader=None
 ):
     logger.info("Running validation... ")
     
@@ -94,18 +125,24 @@ def log_validation(
         raise ValueError("test_dataloader is required for validation")
 
     if not is_final_validation:
+        controlnet = accelerator.unwrap_model(controlnet)
+    else:
+        controlnet = ControlNetModel.from_pretrained(args.output_dir, torch_dtype=weight_dtype)
+
+    if not is_final_validation:
         mapper = accelerator.unwrap_model(mapper)
     else:
         mapper = Mapper(input_dim=1280, output_dim=1024, num_words=20).to(accelerator.device)
-        # mapper = mapper.prepare_mapper_with_unet(unet)
+        mapper = mapper.prepare_mapper_with_unet(unet)
         mapper.load_state_dict(torch.load(args.mapper_model_path))
 
-    pipeline = StableDiffusionPipeline.from_pretrained(
+    pipeline = StableDiffusionControlNetPipeline.from_pretrained(
         args.pretrained_model_name_or_path,
         vae=vae,
         text_encoder=text_encoder,
         tokenizer=tokenizer,
         unet=unet,
+        controlnet=controlnet,
         safety_checker=None,
         revision=args.revision,
         variant=args.variant,
@@ -180,7 +217,6 @@ def log_validation(
 
         # 处理输入图像 (新增部分)
         processed_image_clip = process_validation_image_clip(validation_image)
-        # processed_image_clip = process_validation_image_clip((batch["pixel_values_vae_gt"] + 1) / 2)
         processed_image = process_validation_image(validation_image)
         
         # 提取图像特征和生成嵌入 (新增部分)
@@ -215,13 +251,14 @@ def log_validation(
         images = []
 
         with inference_ctx:
-            # vae_latents = vae.encode(processed_image).latent_dist.mode() * vae.config.scaling_factor 
+            # vae_latents = vae.encode(processed_image).latent_dist.mode() * vae.config.scaling_factor
             vae_embeding = vae.encode(processed_image).latent_dist.mode() 
             vae_embeding_gt = vae.encode(validation_image_gt).latent_dist.mode() 
+            # controlnet_image = vae.encode(controlnet_image).latent_dist.mode() * vae.config.scaling_factor
             
             validation_image = transforms.functional.to_pil_image(validation_image[0])
             images.append(validation_image)
-            # validation_image.save(os.path.join(now_save_path, 'lq', f"batch_{idx}.png"))
+            validation_image.save(os.path.join(now_save_path, 'lq', f"batch_{idx}.png"))
 
             validation_image_gt = (validation_image_gt + 1) / 2
             validation_image_gt = transforms.functional.to_pil_image(validation_image_gt[0])
@@ -232,7 +269,7 @@ def log_validation(
             image_vae = (vae_result + 1) / 2
             image_vae = transforms.functional.to_pil_image(image_vae[0])
             images.append(image_vae)
-            # image_vae.save(os.path.join(now_save_path, 'vae', f"batch_{idx}.png"))
+            image_vae.save(os.path.join(now_save_path, 'vae', f"batch_{idx}.png"))
 
             vae_result_gt = vae.decode(vae_embeding_gt).sample.clamp(-1, 1)
             image_vae_gt = (vae_result_gt + 1) / 2
@@ -244,12 +281,12 @@ def log_validation(
                 # 使用生成的嵌入 (修改部分)
                 image = pipeline(
                     # validation_prompt=None,  # 使用嵌入时不需文本提示
-                    image=processed_image, # this is controlnet input
+                    # image=processed_image,
                     prompt_embeds=prompt_embeds,
                     num_inference_steps=50,
                     guidance_scale=7.5,
                     generator=generator,
-                    # latents=vae_embeding * vae.config.scaling_factor,
+                    latents=vae_embeding * vae.config.scaling_factor,
                     # vae_embeding=vae_embeding,
                 ).images[0]
 
@@ -286,26 +323,6 @@ def log_validation(
         torch.cuda.empty_cache()
 
         return image_logs
-
-
-def import_model_class_from_model_name_or_path(pretrained_model_name_or_path: str, revision: str):
-    text_encoder_config = PretrainedConfig.from_pretrained(
-        pretrained_model_name_or_path,
-        subfolder="text_encoder",
-        revision=revision,
-    )
-    model_class = text_encoder_config.architectures[0]
-
-    if model_class == "CLIPTextModel":
-        from transformers import CLIPTextModel
-
-        return CLIPTextModel
-    elif model_class == "RobertaSeriesModelWithTransformation":
-        from diffusers.pipelines.alt_diffusion.modeling_roberta_series import RobertaSeriesModelWithTransformation
-
-        return RobertaSeriesModelWithTransformation
-    else:
-        raise ValueError(f"{model_class} is not supported.")
 
 
 def save_model_card(repo_id: str, image_logs=None, base_model=str, repo_folder=None):
@@ -360,22 +377,11 @@ def parse_args(input_args=None):
         help="Path to pretrained model or model identifier from huggingface.co/models.",
     )
     parser.add_argument(
-        "--vae_model_name_or_path",
-        type=str,
-        default=None,
-        help="Path to pretrained VAE model or model identifier from huggingface.co/models.",
-    )
-    parser.add_argument(
         "--controlnet_model_name_or_path",
         type=str,
         default=None,
-    )
-    parser.add_argument(
-        "--clip_path",
-        type=str,
-        default=None,
-        required=True,
-        help="Path to pretrained CLIP model or model identifier from huggingface.co/models.",
+        help="Path to pretrained controlnet model or model identifier from huggingface.co/models."
+        " If not specified controlnet weights are initialized from unet.",
     )
     parser.add_argument(
         "--revision",
@@ -597,12 +603,6 @@ def parse_args(input_args=None):
         ),
     )
     parser.add_argument(
-        "--test_data_dir",
-        type=str,
-        default=None,
-        help="A folder containing the test data for evaluation."
-    )
-    parser.add_argument(
         "--image_column", type=str, default="image", help="The column of the dataset containing the target image."
     )
     parser.add_argument(
@@ -612,54 +612,23 @@ def parse_args(input_args=None):
         help="The column of the dataset containing the controlnet conditioning image.",
     )
     parser.add_argument(
-        "--caption_column",
-        type=str,
-        default="text",
-        help="The column of the dataset containing a caption or a list of captions.",
-    )
-    parser.add_argument(
-        "--max_train_samples",
-        type=int,
-        default=None,
-        help=(
-            "For debugging purposes or quicker training, truncate the number of training examples to this "
-            "value if set."
-        ),
-    )
-    parser.add_argument(
-        "--proportion_empty_prompts",
-        type=float,
-        default=0,
-        help="Proportion of image prompts to be replaced with empty strings. Defaults to 0 (no prompt replacement).",
-    )
-    parser.add_argument(
-        "--validation_prompt",
+        "--mapper_model_path",
         type=str,
         default=None,
-        nargs="+",
-        help=(
-            "A set of prompts evaluated every `--validation_steps` and logged to `--report_to`."
-            " Provide either a matching number of `--validation_image`s, a single `--validation_image`"
-            " to be used with all prompts, or a single prompt that will be used with all `--validation_image`s."
-        ),
+        help="Path to a pretrained CLIP-to-ControlNet mapper model",
     )
     parser.add_argument(
-        "--validation_image",
+        "--clip_path",
         type=str,
         default=None,
-        nargs="+",
-        help=(
-            "A set of paths to the controlnet conditioning image be evaluated every `--validation_steps`"
-            " and logged to `--report_to`. Provide either a matching number of `--validation_prompt`s, a"
-            " a single `--validation_prompt` to be used with all `--validation_image`s, or a single"
-            " `--validation_image` that will be used with all `--validation_prompt`s."
-        ),
+        required=True,
+        help="Path to pretrained CLIP model or model identifier from huggingface.co/models.",
     )
     parser.add_argument(
-        "--num_validation_images",
-        type=int,
-        default=4,
-        help="Number of images to be generated for each `--validation_image`, `--validation_prompt` pair",
+        "--test_data_dir",
+        type=str,
+        default=None,
+        help="A folder containing the test data for evaluation."
     )
     parser.add_argument(
         "--validation_steps",
@@ -672,6 +641,12 @@ def parse_args(input_args=None):
         ),
     )
     parser.add_argument(
+        "--num_validation_images",
+        type=int,
+        default=4,
+        help="Number of images to be generated for each `--validation_image`, `--validation_prompt` pair",
+    )
+    parser.add_argument(
         "--tracker_project_name",
         type=str,
         default="train_controlnet",
@@ -681,14 +656,6 @@ def parse_args(input_args=None):
         ),
     )
 
-
-    parser.add_argument(
-        "--mapper_model_path",
-        type=str,
-        default=None,
-        help="Path to pretrained CLIP-I2T mapper model",
-    )
-
     if input_args is not None:
         args = parser.parse_args(input_args)
     else:
@@ -696,30 +663,7 @@ def parse_args(input_args=None):
 
     if args.dataset_name is None and args.train_data_dir is None:
         raise ValueError("Specify either `--dataset_name` or `--train_data_dir`")
-    
-    if args.clip_path is None:
-        raise ValueError("Specify `--clip_path`")
 
-    if args.proportion_empty_prompts < 0 or args.proportion_empty_prompts > 1:
-        raise ValueError("`--proportion_empty_prompts` must be in the range [0, 1].")
-
-    # if args.validation_prompt is not None and args.validation_image is None:
-    #     raise ValueError("`--validation_image` must be set if `--validation_prompt` is set")
-
-    # if args.validation_prompt is None and args.validation_image is not None:
-    #     raise ValueError("`--validation_prompt` must be set if `--validation_image` is set")
-
-    """if (
-        args.validation_image is not None
-        and args.validation_prompt is not None
-        and len(args.validation_image) != 1
-        and len(args.validation_prompt) != 1
-        and len(args.validation_image) != len(args.validation_prompt)
-    ):
-        raise ValueError(
-            "Must provide either 1 `--validation_image`, 1 `--validation_prompt`,"
-            " or the same number of `--validation_prompt`s and `--validation_image`s"
-        )"""
 
     if args.resolution % 8 != 0:
         raise ValueError(
@@ -727,37 +671,6 @@ def parse_args(input_args=None):
         )
 
     return args
-
-def collate_fn(examples):
-    pixel_values = torch.stack([example["pixel_values"] for example in examples])
-    pixel_values = pixel_values.to(memory_format=torch.contiguous_format).float()
-
-    conditioning_pixel_values = torch.stack([example["conditioning_pixel_values"] for example in examples])
-    conditioning_pixel_values = conditioning_pixel_values.to(memory_format=torch.contiguous_format).float()
-
-    pixel_values_clip = torch.stack([example["pixel_values_clip"] for example in examples])
-    pixel_values_clip = pixel_values_clip.to(memory_format=torch.contiguous_format).float()
-
-    pixel_values_vae_gt = torch.stack([example["pixel_values_vae_gt"] for example in examples])
-    pixel_values_vae_gt = pixel_values_vae_gt.to(memory_format=torch.contiguous_format).float()
-
-    pixel_values_normal = torch.stack([example["pixel_values_normal"] for example in examples])
-    pixel_values_normal = pixel_values_normal.to(memory_format=torch.contiguous_format).float()
-
-    input_ids = torch.stack([example["input_ids"] for example in examples])
-
-    degration_type = [example["degration_type"] for example in examples]
-
-    return {
-        "pixel_values": pixel_values,
-        "pixel_values_clip": pixel_values_clip,
-        "conditioning_pixel_values": conditioning_pixel_values,
-        "pixel_values_vae_gt": pixel_values_vae_gt,
-        "pixel_values_normal": pixel_values_normal,
-        "input_ids": input_ids,
-        "degration_type": degration_type,
-    }
-
 
 def main(args):
     if args.report_to == "wandb" and args.hub_token is not None:
@@ -768,9 +681,7 @@ def main(args):
 
     logging_dir = Path(args.output_dir, args.logging_dir)
 
-    accelerator_project_config = ProjectConfiguration(project_dir=args.output_dir, 
-                                                      logging_dir=logging_dir,
-                                                      automatic_checkpoint_naming=False,)  # 禁止自动创建checkpoint-xxx目录
+    accelerator_project_config = ProjectConfiguration(project_dir=args.output_dir, logging_dir=logging_dir)
 
     accelerator = Accelerator(
         gradient_accumulation_steps=args.gradient_accumulation_steps,
@@ -811,7 +722,7 @@ def main(args):
                 repo_id=args.hub_model_id or Path(args.output_dir).name, exist_ok=True, token=args.hub_token
             ).repo_id
 
-    # Load the tokenizer
+    # Load tokenizer
     if args.tokenizer_name:
         tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_name, revision=args.revision, use_fast=False)
     elif args.pretrained_model_name_or_path:
@@ -821,30 +732,28 @@ def main(args):
             revision=args.revision,
             use_fast=False,
         )
-
-    # import correct text encoder class
-    text_encoder_cls = import_model_class_from_model_name_or_path(args.pretrained_model_name_or_path, args.revision)
-
+    
     # Load scheduler and models
     noise_scheduler = DDIMScheduler.from_pretrained(args.pretrained_model_name_or_path, subfolder="scheduler")
-    text_encoder = text_encoder_cls.from_pretrained(
-        args.pretrained_model_name_or_path, subfolder="text_encoder", revision=args.revision, variant=args.variant
+    
+    vae = AutoencoderKL.from_pretrained(
+        args.pretrained_model_name_or_path, subfolder="vae", revision=args.revision, variant=args.variant
     )
-    # vae = AutoencoderKL.from_pretrained(args.pretrained_model_name_or_path, subfolder="vae", revision=args.revision, variant=args.variant)
-
-    vae = AutoencoderKL.from_pretrained(args.pretrained_model_name_or_path, subfolder="vae")
-
     unet = UNet2DConditionModel.from_pretrained(
         args.pretrained_model_name_or_path, subfolder="unet", revision=args.revision, variant=args.variant
     )
 
-    # 加载预训练mapper和图像编码器
-    mapper = Mapper(input_dim=1280, output_dim=1024, num_words=20).to(accelerator.device)
-    # mapper = mapper.prepare_mapper_with_unet(unet)
+    # import text encoder class based on model architecture
+    text_encoder_cls = import_model_class_from_model_name_or_path(
+        args.pretrained_model_name_or_path, args.revision
+    )
+    text_encoder = text_encoder_cls.from_pretrained(
+        args.pretrained_model_name_or_path, subfolder="text_encoder", revision=args.revision, variant=args.variant
+    )
 
-    if args.mapper_model_path is not None:
-        mapper.load_state_dict(torch.load(args.mapper_model_path))
-    
+    # Initialize CLIP image encoder and mapper
+    mapper = Mapper(input_dim=1280, output_dim=1024, num_words=20).to(accelerator.device)
+    mapper.load_state_dict(torch.load(args.mapper_model_path))
 
     clip_image_encoder = CLIPVisionModel.from_pretrained(
         args.clip_path, 
@@ -865,6 +774,13 @@ def main(args):
         if _module.__class__.__name__ == "CLIPTextTransformer":
             _module.__class__.__call__ = custom_forward
 
+    if args.controlnet_model_name_or_path:
+        logger.info("Loading existing controlnet weights")
+        controlnet = ControlNetModel.from_pretrained(args.controlnet_model_name_or_path)
+    else:
+        logger.info("Initializing controlnet weights from unet")
+        controlnet = ControlNetModel.from_unet(unet)
+
     # Taken from [Sayak Paul's Diffusers PR #6511](https://github.com/huggingface/diffusers/pull/6511/files)
     def unwrap_model(model):
         model = accelerator.unwrap_model(model)
@@ -873,71 +789,58 @@ def main(args):
 
     # `accelerate` 0.16.0 will have better support for customized saving
     if version.parse(accelerate.__version__) >= version.parse("0.16.0"):
+        # create custom saving & loading hooks so that `accelerator.save_state(...)` serializes in a nice format
         def save_model_hook(models, weights, output_dir):
             if accelerator.is_main_process:
-                for i, model in enumerate(models):
-                    # 根据模型类型选择保存路径
-                    if hasattr(model, '_is_mapper'):  # 假设在Mapper类中添加了标识属性
-                        sub_dir = "mapper"
+                i = len(weights) - 1
 
-                        # 创建保存目录
-                        model_save_path = os.path.join(output_dir, sub_dir)
-                        os.makedirs(model_save_path, exist_ok=True)
+                while len(weights) > 0:
+                    weights.pop()
+                    model = models[i]
 
-                        state_dict = accelerator.unwrap_model(mapper).state_dict()
+                    sub_dir = "controlnet"
+                    model.save_pretrained(os.path.join(output_dir, sub_dir))
 
-                        torch.save(state_dict, os.path.join(model_save_path, "mapper.pt"))
-                    elif isinstance(model, AutoencoderKL):
-                        sub_dir = "vae"
-                        # 创建保存目录
-                        model_save_path = os.path.join(output_dir, sub_dir)
-                        os.makedirs(model_save_path, exist_ok=True)
-                        
-                        # 保存模型权重和配置文件
-                        model.save_pretrained(model_save_path)
-
-                    else:
-                        raise ValueError("Unknown model type encountered.")  # provide a meaningful error message
-                    
-                    logger.info(f"Saved {sub_dir} to {model_save_path}")
+                    i -= 1
 
         def load_model_hook(models, input_dir):
-            # 先加载ControlNet
+            while len(models) > 0:
+                # pop models so that they are not loaded again
+                model = models.pop()
 
-            # 再加载Mapper
-            mapper_path = os.path.join(input_dir, "mapper")
-            if os.path.exists(mapper_path) and len(models) > 1:
-                mapper_state = torch.load(os.path.join(mapper_path, "pytorch_model.bin"))
-                models[1].load_state_dict(mapper_state)
-                logger.info(f"Loaded Mapper from {mapper_path}")
+                # load diffusers style into model
+                load_model = ControlNetModel.from_pretrained(input_dir, subfolder="controlnet")
+                model.register_to_config(**load_model.config)
+
+                model.load_state_dict(load_model.state_dict())
+                del load_model
 
         accelerator.register_save_state_pre_hook(save_model_hook)
         accelerator.register_load_state_pre_hook(load_model_hook)
 
-    # 自定义保存函数（兼容最新版accelerate）
-    def custom_save_function(output_dir):
-        # 创建模型保存目录
-        mapper_dir = os.path.join(output_dir, "mapper")
-        # vae_dir = os.path.join(output_dir, "vae")
-        os.makedirs(mapper_dir, exist_ok=True)
-        # os.makedirs(vae_dir, exist_ok=True)
-        
-        # 保存Mapper（自定义格式）
-        mapper_state = accelerator.get_state_dict(mapper)
-        torch.save(mapper_state, os.path.join(mapper_dir, "mapper.pt"))
-
-        # 保存VAE（使用diffusers格式）
-        # unwrap_model(vae).save_pretrained(vae_dir)
-
-
+    # freeze non-trainables
     vae.requires_grad_(False)
     unet.requires_grad_(False)
     text_encoder.requires_grad_(False)
     clip_image_encoder.requires_grad_(False)
+    mapper.requires_grad_(False)
+
+    controlnet.train()
     
-    # vae.decoder.requires_grad_(False)
-    # mapper.requires_grad_(False)
-    mapper.train()
+
+    if args.gradient_checkpointing:
+        controlnet.enable_gradient_checkpointing()
+
+    # Check that all trainable models are in full precision
+    low_precision_error_string = (
+        " Please make sure to always have all model weights in full float32 precision when starting training - even if"
+        " doing mixed precision training, copy of the weights should still be float32."
+    )
+
+    if unwrap_model(controlnet).dtype != torch.float32:
+        raise ValueError(
+            f"Controlnet loaded as datatype {unwrap_model(controlnet).dtype}. {low_precision_error_string}"
+        )
 
     # Enable TF32 for faster training on Ampere GPUs,
     # cf https://pytorch.org/docs/stable/notes/cuda.html#tensorfloat-32-tf32-on-ampere-devices
@@ -949,23 +852,12 @@ def main(args):
             args.learning_rate * args.gradient_accumulation_steps * args.train_batch_size * accelerator.num_processes
         )
 
-    # Use 8-bit Adam for lower memory usage or to fine-tune the model in 16GB GPUs
-    if args.use_8bit_adam:
-        try:
-            import bitsandbytes as bnb
-        except ImportError:
-            raise ImportError(
-                "To use 8-bit Adam, please install the bitsandbytes library: `pip install bitsandbytes`."
-            )
+    optimizer_class = torch.optim.AdamW
 
-        optimizer_class = bnb.optim.AdamW8bit
-    else:
-        optimizer_class = torch.optim.AdamW
-
-    # Optimizer creation
-    params_to_optimize = list(mapper.parameters()) # + list(vae.decoder.parameters())
+# Optimizer creation
+    params_to_optimize = controlnet.parameters()
     optimizer = optimizer_class(
-        params = params_to_optimize,
+        params_to_optimize,
         lr=args.learning_rate,
         betas=(args.adam_beta1, args.adam_beta2),
         weight_decay=args.adam_weight_decay,
@@ -986,7 +878,7 @@ def main(args):
         tokenizer=tokenizer,
         size=args.resolution,
         placeholder_token="S",
-        max_sample=100,
+        max_sample=2,
     )
 
     train_dataloader = torch.utils.data.DataLoader(
@@ -1004,24 +896,29 @@ def main(args):
     )
 
     # Scheduler and math around the number of training steps.
-    overrode_max_train_steps = False
-    num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
+    # Check the PR https://github.com/huggingface/diffusers/pull/8312 for detailed explanation.
+    num_warmup_steps_for_scheduler = args.lr_warmup_steps * accelerator.num_processes
     if args.max_train_steps is None:
-        args.max_train_steps = args.num_train_epochs * num_update_steps_per_epoch
-        overrode_max_train_steps = True
+        len_train_dataloader_after_sharding = math.ceil(len(train_dataloader) / accelerator.num_processes)
+        num_update_steps_per_epoch = math.ceil(len_train_dataloader_after_sharding / args.gradient_accumulation_steps)
+        num_training_steps_for_scheduler = (
+            args.num_train_epochs * num_update_steps_per_epoch * accelerator.num_processes
+        )
+    else:
+        num_training_steps_for_scheduler = args.max_train_steps * accelerator.num_processes
 
     lr_scheduler = get_scheduler(
         args.lr_scheduler,
         optimizer=optimizer,
-        num_warmup_steps=args.lr_warmup_steps * accelerator.num_processes,
-        num_training_steps=args.max_train_steps * accelerator.num_processes,
+        num_warmup_steps=num_warmup_steps_for_scheduler,
+        num_training_steps=num_training_steps_for_scheduler,
         num_cycles=args.lr_num_cycles,
         power=args.lr_power,
     )
 
-    # Prepare everything with our `a`ccelerator`.
-    mapper, optimizer, train_dataloader, test_dataloader, lr_scheduler = accelerator.prepare(
-        mapper, optimizer, train_dataloader, test_dataloader, lr_scheduler
+    # Prepare everything with our `accelerator`.
+    controlnet, optimizer, train_dataloader, test_dataloader, lr_scheduler = accelerator.prepare(
+        controlnet, optimizer, train_dataloader, test_dataloader, lr_scheduler
     )
 
     # For mixed precision training we cast the text_encoder and vae weights to half-precision
@@ -1037,11 +934,18 @@ def main(args):
     unet.to(accelerator.device, dtype=weight_dtype)
     text_encoder.to(accelerator.device, dtype=weight_dtype)
     clip_image_encoder.to(accelerator.device, dtype=weight_dtype)
+    mapper.to(accelerator.device, dtype=weight_dtype)
 
     # We need to recalculate our total training steps as the size of the training dataloader may have changed.
     num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
-    if overrode_max_train_steps:
+    if args.max_train_steps is None:
         args.max_train_steps = args.num_train_epochs * num_update_steps_per_epoch
+        if num_training_steps_for_scheduler != args.max_train_steps * accelerator.num_processes:
+            logger.warning(
+                f"The length of the 'train_dataloader' after 'accelerator.prepare' ({len(train_dataloader)}) does not match "
+                f"the expected length ({len_train_dataloader_after_sharding}) when the learning rate scheduler was created. "
+                f"This inconsistency may result in the learning rate scheduler not functioning properly."
+            )
     # Afterwards we recalculate our number of training epochs
     args.num_train_epochs = math.ceil(args.max_train_steps / num_update_steps_per_epoch)
 
@@ -1049,10 +953,6 @@ def main(args):
     # The trackers initializes automatically on the main process.
     if accelerator.is_main_process:
         tracker_config = dict(vars(args))
-
-        # tensorboard cannot handle list types for config
-        tracker_config.pop("validation_prompt")
-        tracker_config.pop("validation_image")
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         accelerator.init_trackers(f"{args.tracker_project_name}_{timestamp}", config=tracker_config)
@@ -1101,20 +1001,21 @@ def main(args):
     image_logs = None
 
     from my_loss.fft_loss import FFTLoss
-    fft_loss = FFTLoss().to(accelerator.device, dtype=weight_dtype).eval()
+    fft_loss = FFTLoss().to(accelerator.device, dtype=weight_dtype).requires_grad_(False)
 
     for epoch in range(first_epoch, args.num_train_epochs):
         for step, batch in enumerate(train_dataloader):
             with accelerator.accumulate([
-                mapper, 
+                controlnet,
                 ]):
-
+                 
                 if step == 0 and global_step==initial_global_step :  # test the first step
                     image_logs = log_validation(
                         vae,
                         text_encoder,
                         tokenizer,
                         unet,
+                        controlnet,
                         args,
                         accelerator,
                         weight_dtype,
@@ -1124,73 +1025,65 @@ def main(args):
                         test_dataloader = test_dataloader,
                     )
 
-                # with torch.no_grad():
-                # 提取图像特征
-                image_features = [clip_image_encoder(batch['pixel_values_clip'],output_hidden_states=True).last_hidden_state]
+                # Get the text embedding for conditioning
+                encoder_hidden_states = text_encoder(batch["input_ids"], return_dict=False)[0]
 
-                image_embeddings = [emb.detach() for emb in image_features]
-                # 通过mapper生成嵌入
-                inj_embedding = mapper(image_embeddings)
-                
-                words = "S".strip().split(' ')
-                placeholder_index = words.index('S') + 1  # +1 因为CLIP添加了开始token
-
-                # 构造注入输入
-                text_input = {
-                    "input_ids": batch["input_ids"],
-                    "inj_embedding": inj_embedding,
-                    "inj_index": torch.tensor([placeholder_index]).to(accelerator.device) 
-                }
-
-                # 替换原来的文本编码器调用
-                encoder_hidden_states = text_encoder(text_input, return_dict=False)[0]
 
                 # Convert images to latent space
-                latents_lq = vae.encode(batch["pixel_values"].to(dtype=weight_dtype)).latent_dist.mode() # * vae.config.scaling_factor
-                # Convert VAE outputs into initial noisy latents via iterative sampling instead of single-step noise prediction
-                latents_hq = vae.encode(batch["pixel_values_vae_gt"].to(dtype=weight_dtype)).latent_dist.mode()
-                
-                latents = latents_hq * vae.config.scaling_factor # the input to unet
+                latents = vae.encode(batch["pixel_values"].to(dtype=weight_dtype)).latent_dist.sample()
+                latents = latents * vae.config.scaling_factor
 
                 # Sample noise that we'll add to the latents
                 noise = torch.randn_like(latents)
-
                 bsz = latents.shape[0]
                 # Sample a random timestep for each image
-                # timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (bsz,), device=latents.device)
-                timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (1,), device=latents.device).expand(bsz)
+                timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (bsz,), device=latents.device)
                 timesteps = timesteps.long()
 
                 # Add noise to the latents according to the noise magnitude at each timestep
                 # (this is the forward diffusion process)
-                noise_scheduler_result = noise_scheduler.add_noise(latents.float(), noise.float(), timesteps)
-                noisy_latents = noise_scheduler_result.to(
-                    dtype=weight_dtype
+                noisy_latents = noise_scheduler.add_noise(latents.float(), noise.float(), timesteps).to(
+                dtype=weight_dtype
                 )
+
+                
+
+                cond_img = batch["conditioning_pixel_values"].to(dtype=weight_dtype)
+                # extract CLIP features and map
+                clip_inputs = (cond_img + 1) / 2
+                clip_feats = clip_image_encoder(clip_inputs, output_hidden_states=True).last_hidden_state
+                controlnet_cond = mapper(clip_feats)
+
+                down_block_res_samples, mid_block_res_sample = controlnet(
+                 noisy_latents,
+                 timesteps,
+                 encoder_hidden_states=encoder_hidden_states,
+                 controlnet_cond=controlnet_cond,
+                 return_dict=False,
+             )
 
                 # Predict the noise residual
                 model_pred = unet(
                     noisy_latents,
                     timesteps,
                     encoder_hidden_states=encoder_hidden_states,
+                    down_block_additional_residuals=[
+                        sample.to(dtype=weight_dtype) for sample in down_block_res_samples
+                    ],
+                    mid_block_additional_residual=mid_block_res_sample.to(dtype=weight_dtype),
                     return_dict=False,
                 )[0]
 
-                # recompute the latents using model_pred
-                noise_scheduler.set_timesteps(num_inference_steps=50, device=accelerator.device)
+                # Get the target for loss depending on the prediction type
+                if noise_scheduler.config.prediction_type == "epsilon":
+                    target = noise
                 
-                loss_mse_noise = F.mse_loss(model_pred.float(), noise.float(), reduction="mean")
-
-                scale_loss_mse_noise = 1
-
-                loss = (scale_loss_mse_noise * loss_mse_noise)
+                loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
 
                 accelerator.backward(loss)
                 if accelerator.sync_gradients:
-
-                    mapper_params = mapper.parameters()
-                    accelerator.clip_grad_norm_(mapper_params, args.max_grad_norm)
-
+                    params_to_clip = controlnet.parameters()
+                    accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
                 optimizer.step()
                 lr_scheduler.step()
                 optimizer.zero_grad(set_to_none=args.set_grads_to_none)
@@ -1205,7 +1098,7 @@ def main(args):
                         # _before_ saving state, check if this save would set us over the `checkpoints_total_limit`
                         if args.checkpoints_total_limit is not None:
                             checkpoints = os.listdir(args.output_dir)
-                            checkpoints = [d for d in checkpoints if d.startswith("mapper_checkpoint")]
+                            checkpoints = [d for d in checkpoints if d.startswith("checkpoint")]
                             checkpoints = sorted(checkpoints, key=lambda x: int(x.split("-")[1]))
 
                             # before we save the new checkpoint, we need to have at _most_ `checkpoints_total_limit - 1` checkpoints
@@ -1222,17 +1115,17 @@ def main(args):
                                     removing_checkpoint = os.path.join(args.output_dir, removing_checkpoint)
                                     shutil.rmtree(removing_checkpoint)
 
-                        save_path = os.path.join(args.output_dir, f"mapper_checkpoint-{global_step}")
-                        custom_save_function(save_path)
-                        # accelerator.save_state(save_path)
+                        save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
+                        accelerator.save_state(save_path)
                         logger.info(f"Saved state to {save_path}")
 
-                    if global_step % args.validation_steps == 0:
+                    if args.validation_prompt is not None and global_step % args.validation_steps == 0:
                         image_logs = log_validation(
                             vae,
                             text_encoder,
                             tokenizer,
                             unet,
+                            controlnet,
                             args,
                             accelerator,
                             weight_dtype,
@@ -1255,9 +1148,6 @@ def main(args):
         controlnet = unwrap_model(controlnet)
         controlnet.save_pretrained(args.output_dir)
 
-        mapper_state = accelerator.get_state_dict(mapper)
-        torch.save(mapper_state, os.path.join(args.output_dir, "pytorch_model.bin"))
-
         # Run a final round of validation.
         image_logs = None
         if args.validation_prompt is not None:
@@ -1266,13 +1156,14 @@ def main(args):
                 text_encoder=text_encoder,
                 tokenizer=tokenizer,
                 unet=unet,
+                controlnet=None,
                 args=args,
                 accelerator=accelerator,
                 weight_dtype=weight_dtype,
                 step=global_step,
                 is_final_validation=True,
                 clip_image_encoder = clip_image_encoder,
-                mapper = None,
+                mapper = mapper,
                 test_dataloader = test_dataloader,
             )
 
