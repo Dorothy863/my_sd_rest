@@ -75,10 +75,11 @@ allow_degradation_dict = {
     'low-light': True,
     'motion-blurry': True,  # 值可以用于存储其他配置参数
     'raindrop': True,
-    'rainy': True,
     'shadowed': True,
     'snowy': True,
     # 'uncompleted': True,
+    'rainy': True,
+    'Rain100L': True,
     # ...添加其他允许的类型
 }
 

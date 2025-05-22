@@ -90,10 +90,10 @@
             "request": "launch",
             "program": "${workspaceFolder}/train/train_fine_mapper.py",
             "args": [
-                "--pretrained_model_name_or_path=/root/stable-diffusion-2-1-base",
-                "--clip_path=/root/CLIP-ViT-H-14-laion2B-s32B-b79K",
+                "--pretrained_model_name_or_path=/root/autodl-tmp/stable-diffusion-2-1-base",
+                "--clip_path=/root/autodl-tmp/CLIP-ViT-H-14-laion2B-s32B-b79K",
                 "--mapper_model_path=/root/my_sd_rest/experience/mapper_checkpoint-36000/mapper/mapper.pt",
-                // "--fine_mapper_model_path=/root/autodl-tmp/fine_mapper_checkpoint-5000/fine_mapper/fine_mapper.pt",
+                "--fine_mapper_model_path=/root/autodl-tmp/fine_mapper_checkpoint-5000/fine_mapper/fine_mapper.pt",
                 "--train_data_dir=/root/autodl-tmp/train",
                 "--test_data_dir=/root/autodl-tmp/new_val",
                 "--output_dir=${workspaceFolder}/experience",

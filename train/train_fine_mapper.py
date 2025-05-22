@@ -22,6 +22,7 @@ import os
 import random
 import shutil
 from pathlib import Path
+import re
 
 import accelerate
 import numpy as np
@@ -1042,15 +1043,16 @@ def main(args):
     # Potentially load in the weights and states from a previous save
     if args.fine_mapper_model_path:
         path = args.fine_mapper_model_path
-
         if not os.path.exists(path):
             raise ValueError(f"Model weights not found at {path}, should not use controlnet_model_name_or_path or provide a valid path.")
         else:
-            global_step = int(str(path.split("-")[1]).split('/')[0])
-
+            # 使用正则表达式匹配路径中的checkpoint-数字格式
+            match = re.search(r'checkpoint-(\d+)', path)
+            if not match:
+                raise ValueError(f"Global step not found in checkpoint path: {path}")
+            global_step = int(match.group(1))
             initial_global_step = global_step
             first_epoch = global_step // num_update_steps_per_epoch
-            
     else:
         initial_global_step = 0
 
