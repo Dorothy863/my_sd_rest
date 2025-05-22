@@ -156,7 +156,7 @@ unet = UNet2DConditionModel.from_pretrained(sd_path, subfolder="unet").to("cuda"
 text_encoder = CLIPTextModel.from_pretrained(sd_path, subfolder="text_encoder").to("cuda")
 
 mapper_path = "/data/coding/mapper_024000.pt"
-from clip_mapper.mapper import Mapper
+from my_modules.mapper import Mapper
 mapper = Mapper(input_dim=1280, output_dim=1024, num_words=20).to('cuda')
 mapper = mapper.prepare_mapper_with_unet(unet)
 mapper.load_state_dict(torch.load(mapper_path))

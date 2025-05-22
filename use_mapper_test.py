@@ -1,4 +1,4 @@
-from clip_mapper.mapper import Mapper
+from my_modules.mapper import Mapper
 import torch
 
 from typing import Optional, Tuple, Union
