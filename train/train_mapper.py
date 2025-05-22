@@ -986,7 +986,7 @@ def main(args):
         tokenizer=tokenizer,
         size=args.resolution,
         placeholder_token="S",
-        max_sample=200,
+        max_sample=100,
     )
 
     train_dataloader = torch.utils.data.DataLoader(
@@ -1178,16 +1178,8 @@ def main(args):
 
                 # recompute the latents using model_pred
                 noise_scheduler.set_timesteps(num_inference_steps=50, device=accelerator.device)
-
-                # Get the target for loss depending on the prediction type
-                if noise_scheduler.config.prediction_type == "epsilon":
-                    target = noise
-                elif noise_scheduler.config.prediction_type == "v_prediction":
-                    target = noise_scheduler.get_velocity(latents, noise, timesteps)
-                else:
-                    raise ValueError(f"Unknown prediction type {noise_scheduler.config.prediction_type}")
                 
-                loss_mse_noise = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
+                loss_mse_noise = F.mse_loss(model_pred.float(), noise.float(), reduction="mean")
 
                 scale_loss_mse_noise = 1
 
