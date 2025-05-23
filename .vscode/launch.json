@@ -73,7 +73,7 @@
                 "--checkpoints_total_limit=5",
                 "--num_validation_images=2",
 
-                "--train_batch_size=4",
+                "--train_batch_size=16",
                 "--gradient_accumulation_steps=1",
 
                 "--use_8bit_adam",
