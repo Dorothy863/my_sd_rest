@@ -42,7 +42,11 @@ from torchvision import transforms
 from tqdm.auto import tqdm
 from transformers import AutoTokenizer, PretrainedConfig
 from transformers import CLIPVisionModel
-from my_modules.mapper import Mapper
+
+from my_modules import (
+    Mapper,
+    ModifiedAutoencoderKL,
+)
 
 import diffusers
 from diffusers import (
@@ -739,6 +743,7 @@ def main(args):
     vae = AutoencoderKL.from_pretrained(
         args.pretrained_model_name_or_path, subfolder="vae", revision=args.revision, variant=args.variant
     )
+    vae = ModifiedAutoencoderKL(**vae.config)
     unet = UNet2DConditionModel.from_pretrained(
         args.pretrained_model_name_or_path, subfolder="unet", revision=args.revision, variant=args.variant
     )
