@@ -244,7 +244,7 @@ def log_validation(
                 # 使用生成的嵌入 (修改部分)
                 image = pipeline(
                     # validation_prompt=None,  # 使用嵌入时不需文本提示
-                    image=processed_image, # this is controlnet input
+                    # image=processed_image, # this is controlnet input
                     prompt_embeds=prompt_embeds,
                     num_inference_steps=50,
                     guidance_scale=7.5,

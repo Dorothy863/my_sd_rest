@@ -258,7 +258,7 @@ def log_validation(
             
             validation_image = transforms.functional.to_pil_image(validation_image[0])
             images.append(validation_image)
-            validation_image.save(os.path.join(now_save_path, 'lq', f"batch_{idx}.png"))
+            # validation_image.save(os.path.join(now_save_path, 'lq', f"batch_{idx}.png"))
 
             validation_image_gt = (validation_image_gt + 1) / 2
             validation_image_gt = transforms.functional.to_pil_image(validation_image_gt[0])
@@ -269,19 +269,19 @@ def log_validation(
             image_vae = (vae_result + 1) / 2
             image_vae = transforms.functional.to_pil_image(image_vae[0])
             images.append(image_vae)
-            image_vae.save(os.path.join(now_save_path, 'vae', f"batch_{idx}.png"))
+            # image_vae.save(os.path.join(now_save_path, 'vae', f"batch_{idx}.png"))
 
             vae_result_gt = vae.decode(vae_embeding_gt).sample.clamp(-1, 1)
             image_vae_gt = (vae_result_gt + 1) / 2
             image_vae_gt = transforms.functional.to_pil_image(image_vae_gt[0])
             images.append(image_vae_gt)
-            # image_vae_gt.save(os.path.join(now_save_path, 'vae_gt', f"batch_{idx}.png"))
+            image_vae_gt.save(os.path.join(now_save_path, 'vae_gt', f"batch_{idx}.png"))
 
             for _ in range(args.num_validation_images):
                 # 使用生成的嵌入 (修改部分)
                 image = pipeline(
                     # validation_prompt=None,  # 使用嵌入时不需文本提示
-                    # image=processed_image,
+                    image=processed_image,
                     prompt_embeds=prompt_embeds,
                     num_inference_steps=50,
                     guidance_scale=7.5,
@@ -818,6 +818,26 @@ def main(args):
         accelerator.register_save_state_pre_hook(save_model_hook)
         accelerator.register_load_state_pre_hook(load_model_hook)
 
+    # 自定义保存函数（兼容最新版accelerate）
+    def custom_save_function(output_dir):
+        # 创建模型保存目录
+        controlnet_dir = os.path.join(output_dir, "controlnet")
+        mapper_dir = os.path.join(output_dir, "mapper")
+        vae_dir = os.path.join(output_dir, "vae")
+        os.makedirs(controlnet_dir, exist_ok=True)
+        # os.makedirs(mapper_dir, exist_ok=True)
+        # os.makedirs(vae_dir, exist_ok=True)
+        
+        # 保存ControlNet（使用diffusers格式）
+        unwrap_model(controlnet).save_pretrained(controlnet_dir)
+        
+        # 保存Mapper（自定义格式）
+        # mapper_state = accelerator.get_state_dict(mapper)
+        # torch.save(mapper_state, os.path.join(mapper_dir, "mapper.pt"))
+
+        # 保存VAE（使用diffusers格式）
+        # unwrap_model(vae).save_pretrained(vae_dir)
+
     # freeze non-trainables
     vae.requires_grad_(False)
     unet.requires_grad_(False)
@@ -1026,41 +1046,53 @@ def main(args):
                     )
 
                 # Get the text embedding for conditioning
-                encoder_hidden_states = text_encoder(batch["input_ids"], return_dict=False)[0]
+                # with torch.no_grad():
+                # 提取图像特征
+                image_features = [clip_image_encoder(batch['pixel_values_clip'],output_hidden_states=True).last_hidden_state]
+                image_embeddings = [emb.detach() for emb in image_features]
+                # 通过mapper生成嵌入
+                inj_embedding = mapper(image_embeddings)
+                
+                words = "S".strip().split(' ')
+                placeholder_index = words.index('S') + 1  # +1 因为CLIP添加了开始token
 
+                # 构造注入输入
+                text_input = {
+                    "input_ids": batch["input_ids"],
+                    "inj_embedding": inj_embedding,
+                    "inj_index": torch.tensor([placeholder_index]).to(accelerator.device) 
+                }
+
+                # 替换原来的文本编码器调用
+                encoder_hidden_states = text_encoder(text_input, return_dict=False)[0]
 
                 # Convert images to latent space
-                latents = vae.encode(batch["pixel_values"].to(dtype=weight_dtype)).latent_dist.sample()
-                latents = latents * vae.config.scaling_factor
+                latents_lq = vae.encode(batch["pixel_values"].to(dtype=weight_dtype)).latent_dist.mode() # * vae.config.scaling_factor
+                latents_hq = vae.encode(batch["pixel_values_vae_gt"].to(dtype=weight_dtype)).latent_dist.mode()
+
+                latents = latents_hq * vae.config.scaling_factor # the input to unet
+
 
                 # Sample noise that we'll add to the latents
                 noise = torch.randn_like(latents)
                 bsz = latents.shape[0]
                 # Sample a random timestep for each image
-                timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (bsz,), device=latents.device)
+                timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (1,), device=latents.device).expand(bsz)
                 timesteps = timesteps.long()
 
                 # Add noise to the latents according to the noise magnitude at each timestep
                 # (this is the forward diffusion process)
-                noisy_latents = noise_scheduler.add_noise(latents.float(), noise.float(), timesteps).to(
-                dtype=weight_dtype
-                )
+                noisy_latents = noise_scheduler.add_noise(latents.float(), noise.float(), timesteps).to(dtype=weight_dtype)
 
-                
-
-                cond_img = batch["conditioning_pixel_values"].to(dtype=weight_dtype)
-                # extract CLIP features and map
-                clip_inputs = (cond_img + 1) / 2
-                clip_feats = clip_image_encoder(clip_inputs, output_hidden_states=True).last_hidden_state
-                controlnet_cond = mapper(clip_feats)
+                controlnet_cond = batch["conditioning_pixel_values"].to(dtype=weight_dtype)
 
                 down_block_res_samples, mid_block_res_sample = controlnet(
-                 noisy_latents,
-                 timesteps,
-                 encoder_hidden_states=encoder_hidden_states,
-                 controlnet_cond=controlnet_cond,
-                 return_dict=False,
-             )
+                    noisy_latents,
+                    timesteps,
+                    encoder_hidden_states=encoder_hidden_states,
+                    controlnet_cond=controlnet_cond,
+                    return_dict=False,
+                )
 
                 # Predict the noise residual
                 model_pred = unet(
@@ -1116,10 +1148,11 @@ def main(args):
                                     shutil.rmtree(removing_checkpoint)
 
                         save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
-                        accelerator.save_state(save_path)
+                        custom_save_function(save_path)
+                        # accelerator.save_state(save_path)
                         logger.info(f"Saved state to {save_path}")
 
-                    if args.validation_prompt is not None and global_step % args.validation_steps == 0:
+                    if global_step % args.validation_steps == 0:
                         image_logs = log_validation(
                             vae,
                             text_encoder,
