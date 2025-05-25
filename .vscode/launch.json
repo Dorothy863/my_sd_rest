@@ -88,6 +88,43 @@
             "justMyCode": false,
         },
         {
+            "name": "Python: New Train vae and ControlNet",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/train/train_vae_by_controlnet.py",
+            "args": [
+                "--pretrained_model_name_or_path=/root/autodl-tmp/stable-diffusion-2-1-base",
+                "--clip_path=/root/autodl-tmp/CLIP-ViT-H-14-laion2B-s32B-b79K",
+                "--mapper_model_path=/root/my_sd_rest/experience/mapper_checkpoint-39000/mapper/mapper.pt",
+                "--controlnet_model_name_or_path=/root/my_sd_rest/experience/checkpoint-99000/controlnet",
+                "--train_data_dir=/root/autodl-tmp/train",
+                "--test_data_dir=/root/autodl-tmp/new_val",
+                "--output_dir=${workspaceFolder}/experience",
+                "--logging_dir=logs",
+
+                "--resolution=512",
+                "--learning_rate=1e-6",
+                "--checkpointing_steps=1000",
+                "--validation_steps=500",
+                "--num_train_epochs=100",
+                "--checkpoints_total_limit=5",
+                "--num_validation_images=2",
+
+                "--train_batch_size=16",
+                "--gradient_accumulation_steps=1",
+
+                "--use_8bit_adam",
+                "--mixed_precision=fp16",
+
+            ],
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}"
+            },
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+        },
+        {
             "name": "Python: New Train Fine Mapper",
             "type": "debugpy",
             "request": "launch",

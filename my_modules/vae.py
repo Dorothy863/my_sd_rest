@@ -1,22 +1,64 @@
 from diffusers.models import AutoencoderKL
 import torch.nn as nn
 import torch
+import torch.nn.functional as F
 
 # 这是一个修改过的VAE模型，添加了跳跃连接以增强特征融合 
 class ModifiedAutoencoderKL(AutoencoderKL):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         
-        # Step 1 - 创建常规卷积层, 在编解码器间建立连接通道
-        self.skip_connections = nn.ModuleList([
-            nn.Conv2d(enc_ch, dec_ch, 1)
-            for enc_ch, dec_ch in zip([128, 256, 512], [512, 256, 128])  # 需根据实际通道数调整
+        # 精确匹配各下采样层到对应上采样层的通道参数
+        self.skip_convs = nn.ModuleList([
+            # Down0 → Up3 残差连接参数 (128 → 256)
+            nn.Conv2d(128, 256, 1),
+            # Down1 → Up2 残差连接参数 (256 → 512)
+            nn.Conv2d(256, 512, 1),
+            # Down2 → Up1 残差连接参数 (512 → 512) 
+            nn.Conv2d(512, 512, 1),
+            # Down3 → Up0 残差连接参数 (512 → 512)
+            nn.Conv2d(512, 512, 1)
         ])
+        
+        # 全零初始化确保初始态无影响
+        for conv in self.skip_convs:
+            nn.init.zeros_(conv.weight)
+            nn.init.zeros_(conv.bias)
 
-        # Step 2 - 对每个卷积层单独初始化
-        for conv in self.skip_connections:
-            nn.init.zeros_(conv.weight)   # 权重归零
-            nn.init.zeros_(conv.bias)     # 偏置归零
+    def forward(self, x):
+        # ========== Encoder侧特征收集 ==========
+        encoder_outs = []
+        x = self.encoder.conv_in(x)
+        encoder_outs.append(x)  # Down0前特征
+        
+        # 各下采样块输出特征记录
+        for down_block in self.encoder.down_blocks:
+            x = down_block(x)
+            encoder_outs.append(x)  # Down0/Down1/Down2/Down3
+            
+        # ========== Decoder侧特征融合 ==========
+        x = self.post_quant_conv(x)
+        x = self.decoder.conv_in(x)
+        
+        # 逆序使用编码特征（Deep→Shallow）解码器层索引：0→3→2→1→0 ???
+        for i, up_block in enumerate(self.decoder.up_blocks):
+            # 对应编码层索引计算：3 → 2 → 1 → 0
+            enc_idx = 3 - i
+            
+            # 残差路径计算（包含上采样对齐）
+            skip = F.interpolate(
+                self.skip_convs[i](encoder_outs[enc_idx]),
+                size=x.shape[-2:],
+                mode='nearest'
+            )
+            
+            # 残差融合
+            x = x + skip  # 直接相加，不改变主路径信息
+            
+            # 继续原始处理流程
+            x = up_block(x)
+            
+        return self.decoder.conv_out(x)
 
     def get_encoder_features(self, x):
         # 编码器阶段收集特征
@@ -26,6 +68,8 @@ class ModifiedAutoencoderKL(AutoencoderKL):
             x = down_block(x)
             encoder_features.append(x)
         return encoder_features
+
+    
 
     def forward(self, x):
         # 编码器阶段收集特征

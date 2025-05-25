@@ -210,3 +210,26 @@ Decoder(
   (conv_act): SiLU()
   (conv_out): Conv2d(128, 3, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1))
 )
+
+
+post_quant_conv(
+  Conv2d(4, 4, kernel_size=(1, 1), stride=(1, 1))
+)
+quant_conv(
+  Conv2d(8, 8, kernel_size=(1, 1), stride=(1, 1))
+)
+
+
+
+model_analyze
+Encoder channel
+  128
+  256
+  512
+  512
+
+Decoder
+  512
+  512
+  512
+  256

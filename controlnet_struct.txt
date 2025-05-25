@@ -1,0 +1,30 @@
+controlnet_cond_embedding(
+    ControlNetConditioningEmbedding(
+        (conv_in): Conv2d(3, 16, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1))
+        (blocks): ModuleList(
+            (0): Conv2d(16, 16, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1))
+            (1): Conv2d(16, 32, kernel_size=(3, 3), stride=(2, 2), padding=(1, 1))
+            (2): Conv2d(32, 32, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1))
+            (3): Conv2d(32, 96, kernel_size=(3, 3), stride=(2, 2), padding=(1, 1))
+            (4): Conv2d(96, 96, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1))
+            (5): Conv2d(96, 256, kernel_size=(3, 3), stride=(2, 2), padding=(1, 1))
+        )
+        (conv_out): Conv2d(256, 320, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1))
+    )
+)
+
+controlnet_down_blocks(
+    ModuleList(
+        (0-3): 4 x Conv2d(320, 320, kernel_size=(1, 1), stride=(1, 1))
+        (4-6): 3 x Conv2d(640, 640, kernel_size=(1, 1), stride=(1, 1))
+        (7-11): 5 x Conv2d(1280, 1280, kernel_size=(1, 1), stride=(1, 1))
+    )
+)
+
+controlnet_mid_blocks(
+    Conv2d(1280, 1280, kernel_size=(1, 1), stride=(1, 1))
+)
+
+conv_in(
+    Conv2d(4, 320, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1))
+)

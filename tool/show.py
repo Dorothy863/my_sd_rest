@@ -81,3 +81,44 @@ def print_model_dtypes(model):
     for name, module in model.named_modules():
         for param_name, param in module.named_parameters(recurse=False):
             print(f"Module: {name:<40} | Parameter: {param_name:<15} | dtype: {param.dtype}")
+
+def analyze_model_channels(model):
+    architecture = {'encoder': {'down_blocks': []}, 
+                    'decoder': {'up_blocks': []}}
+
+    # 分析编码器
+    for block_idx, down_block in enumerate(model.encoder.down_blocks):
+        block_info = {
+            'output_channels': None,
+            'resnets': [],
+            'downsampler': None
+        }
+        
+        # 检测下采样块最终输出通道
+        if hasattr(down_block, 'resnets'):
+            for resnet in down_block.resnets:
+                conv2 = resnet.conv2
+                block_info['resnets'].append(conv2.out_channels if hasattr(conv2, 'out_channels') else conv2.weight.shape[0])
+        
+        if hasattr(down_block, 'downsamplers') and down_block.downsamplers:
+            downsample_conv = down_block.downsamplers[0].conv
+            block_info['downsampler'] = downsample_conv.out_channels if hasattr(downsample_conv, 'out_channels') else downsample_conv.weight.shape[0]
+            block_info['output_channels'] = block_info['downsampler'] if block_info['downsampler'] else block_info['resnets'][-1]
+        
+        architecture['encoder']['down_blocks'].append(block_info)
+
+    # 分析解码器 
+    for block_idx, up_block in enumerate(model.decoder.up_blocks):
+        block_info = {
+            'input_channels': None,
+            'resnets': [],
+            'upsampler': None
+        }
+        
+        # 获取第一个resnet的第一个卷积输入通道作为该block输入
+        first_resnet_conv = up_block.resnets[0].conv1
+        block_info['input_channels'] = first_resnet_conv.in_channels if hasattr(first_resnet_conv, 'in_channels') else first_resnet_conv.weight.shape[1]
+        
+        architecture['decoder']['up_blocks'].append(block_info)
+
+    return architecture
