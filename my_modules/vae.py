@@ -7,11 +7,16 @@ class ModifiedAutoencoderKL(AutoencoderKL):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         
-        # 在编解码器间建立连接通道
+        # Step 1 - 创建常规卷积层, 在编解码器间建立连接通道
         self.skip_connections = nn.ModuleList([
             nn.Conv2d(enc_ch, dec_ch, 1)
             for enc_ch, dec_ch in zip([128, 256, 512], [512, 256, 128])  # 需根据实际通道数调整
         ])
+
+        # Step 2 - 对每个卷积层单独初始化
+        for conv in self.skip_connections:
+            nn.init.zeros_(conv.weight)   # 权重归零
+            nn.init.zeros_(conv.bias)     # 偏置归零
 
     def get_encoder_features(self, x):
         # 编码器阶段收集特征
@@ -21,12 +26,6 @@ class ModifiedAutoencoderKL(AutoencoderKL):
             x = down_block(x)
             encoder_features.append(x)
         return encoder_features
-    
-    def decode_by_middle_and_skip(self, x):
-
-        x = self.encoder.mid_block(x)
-
-        return x
 
     def forward(self, x):
         # 编码器阶段收集特征

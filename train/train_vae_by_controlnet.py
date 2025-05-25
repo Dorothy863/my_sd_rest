@@ -831,7 +831,7 @@ def main(args):
         vae_dir = os.path.join(output_dir, "vae")
         os.makedirs(controlnet_dir, exist_ok=True)
         # os.makedirs(mapper_dir, exist_ok=True)
-        # os.makedirs(vae_dir, exist_ok=True)
+        os.makedirs(vae_dir, exist_ok=True)
         
         # 保存ControlNet（使用diffusers格式）
         unwrap_model(controlnet).save_pretrained(controlnet_dir)
@@ -841,15 +841,16 @@ def main(args):
         # torch.save(mapper_state, os.path.join(mapper_dir, "mapper.pt"))
 
         # 保存VAE（使用diffusers格式）
-        # unwrap_model(vae).save_pretrained(vae_dir)
+        unwrap_model(vae).save_pretrained(vae_dir)
 
     # freeze non-trainables
-    vae.requires_grad_(False)
     unet.requires_grad_(False)
     text_encoder.requires_grad_(False)
     clip_image_encoder.requires_grad_(False)
     mapper.requires_grad_(False)
 
+    # vae.requires_grad_(False)
+    vae.train()
     controlnet.train()
     
 
@@ -880,10 +881,21 @@ def main(args):
     optimizer_class = torch.optim.AdamW
 
 # Optimizer creation
-    params_to_optimize = controlnet.parameters()
+    # 参数分组优化（预训练参数小学习率，新增参数大学习率）
+    # 组合VAE参数分组 + ControlNet参数
+    param_groups = [
+        # VAE预训练参数（小学习率）
+        {"params": [p for name, p in vae.named_parameters() if "skip_connections" not in name], "lr": args.learning_rate},
+        
+        # VAE新增参数（大学习率）
+        {"params": [p for name, p in vae.named_parameters() if "skip_connections" in name], "lr": args.learning_rate * 100},
+        
+        # ControlNet参数（使用标准学习率）
+        {"params": controlnet.parameters(), "lr": args.learning_rate}
+    ]
+
     optimizer = optimizer_class(
-        params_to_optimize,
-        lr=args.learning_rate,
+        param_groups,
         betas=(args.adam_beta1, args.adam_beta2),
         weight_decay=args.adam_weight_decay,
         eps=args.adam_epsilon,
@@ -1032,6 +1044,7 @@ def main(args):
         for step, batch in enumerate(train_dataloader):
             with accelerator.accumulate([
                 controlnet,
+                vae,
                 ]):
                  
                 if step == 0 and global_step==initial_global_step :  # test the first step
@@ -1119,7 +1132,7 @@ def main(args):
 
                 accelerator.backward(loss)
                 if accelerator.sync_gradients:
-                    params_to_clip = controlnet.parameters()
+                    params_to_clip = [controlnet.parameters() + vae.parameters()]
                     accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
                 optimizer.step()
                 lr_scheduler.step()

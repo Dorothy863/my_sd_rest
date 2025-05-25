@@ -848,6 +848,7 @@ def main(args):
     vae.requires_grad_(False)
     unet.requires_grad_(False)
     text_encoder.requires_grad_(False)
+    
     controlnet.train()
 
     if args.gradient_checkpointing:
