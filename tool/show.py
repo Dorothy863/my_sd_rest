@@ -82,6 +82,30 @@ def print_model_dtypes(model):
         for param_name, param in module.named_parameters(recurse=False):
             print(f"Module: {name:<40} | Parameter: {param_name:<15} | dtype: {param.dtype}")
 
+def count_parameters(model, format=False):
+    """统计模型总参数和可训练参数
+    
+    Args:
+        model: PyTorch模型
+        format: 是否自动格式化为M/B单位
+    
+    Returns:
+        total (int): 总参数数量
+        trainable (int): 可训练参数数量
+        或根据format返回格式化字符串
+    """
+    total = sum(p.numel() for p in model.parameters())
+    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    if not format:
+        return total, trainable
+    else:
+        def _format(num):
+            if num >= 1e9:
+                return f"{num/1e9:.2f}B"
+            return f"{num/1e6:.2f}M" if num >= 1e6 else f"{num/1e3:.0f}K"
+        
+        return _format(total), _format(trainable)
+
 def analyze_model_channels(model):
     architecture = {'encoder': {'down_blocks': []}, 
                     'decoder': {'up_blocks': []}}
