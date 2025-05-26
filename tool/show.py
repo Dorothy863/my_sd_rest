@@ -96,14 +96,18 @@ def count_parameters(model, format=False):
     """
     total = sum(p.numel() for p in model.parameters())
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+    one_million = 1024 * 1024
+    one_billion = 1024 * 1024 * 1024
+
     if not format:
         return total, trainable
     else:
         def _format(num):
-            if num >= 1e9:
-                return f"{num/1e9:.2f}B"
-            return f"{num/1e6:.2f}M" if num >= 1e6 else f"{num/1e3:.0f}K"
-        
+            if num >= one_billion:
+                return f"{num/one_billion:.2f}B"
+            return f"{num/one_million:.2f}M" if num >= one_million else f"{num/1024:.0f}K"
+
         return _format(total), _format(trainable)
 
 def analyze_model_channels(model):
